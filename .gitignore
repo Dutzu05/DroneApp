@@ -1,0 +1,23 @@
+# Ignore the local Flutter SDK and Postgres Database
+.tooling/
+.postgres/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Flutter / Dart standard ignores
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+android/local.properties
+ios/Flutter/App.framework
+ios/Flutter/Flutter.framework
+
+# System junk
+.DS_Store
+Thumbs.db
