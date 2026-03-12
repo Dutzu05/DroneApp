@@ -31,6 +31,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import threading
@@ -38,6 +39,24 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+# Flight plan manager (PDF + contacts)
+_FM_PATH = Path(__file__).resolve().parent / "flight_plan_manager.py"
+if _FM_PATH.exists():
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("flight_plan_manager", _FM_PATH)
+    _fm_mod = _ilu.module_from_spec(_spec)          # type: ignore[arg-type]
+    _spec.loader.exec_module(_fm_mod)               # type: ignore[union-attr]
+    import sys as _sys
+    _sys.modules["flight_plan_manager"] = _fm_mod
+    import flight_plan_manager as _fm
+    TOWER_CONTACTS = _fm.TOWER_CONTACTS
+    _area_check    = _fm.area_check
+    _fill_anexa1   = _fm.fill_anexa1
+else:
+    TOWER_CONTACTS = {}
+    _area_check    = None
+    _fill_anexa1   = None
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ASSET_DIR  = SCRIPT_DIR.parent / "mobile_app" / "assets"
@@ -144,6 +163,93 @@ HTML = b"""<!DOCTYPE html>
   .popup-lbl { color: var(--muted); min-width: 80px; }
   .popup-val { color: var(--text); word-break: break-word; }
   .pill { display: inline-block; padding: 1px 7px; border-radius: 12px; font-size: 0.65rem; font-weight: 700; color: #fff; }
+
+  /* --- Flight Plan Manager --- */
+  .fp-launch-btn {
+    width: 100%; padding: 9px; background: linear-gradient(135deg,#e94560,#c0392b);
+    color: #fff; border: none; border-radius: 7px; cursor: pointer;
+    font-size: 0.85rem; font-weight: 700; letter-spacing:.03em;
+    transition: opacity .15s; margin-top: 4px;
+  }
+  .fp-launch-btn:hover { opacity:.85; }
+
+  #fpOverlay {
+    display: none; position: absolute; top: 0; left: 280px; right: 0; bottom: 0;
+    z-index: 2000; background: rgba(0,0,0,.45);
+  }
+  #fpWizard {
+    position: absolute; right: 20px; top: 20px;
+    width: 400px; max-height: calc(100vh - 40px);
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.7);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #fpWizard .wiz-head {
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  #fpWizard .wiz-head h2 { font-size:0.95rem; font-weight:700; color:var(--accent); flex:1; }
+  #fpWizard .wiz-head .close-wiz {
+    background:none; border:none; color:var(--muted); font-size:1.3rem;
+    cursor:pointer; line-height:1;
+  }
+  .step-indicator {
+    display: flex; padding: 10px 16px; gap: 4px; background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .step-dot {
+    flex: 1; height: 4px; border-radius: 2px; background: var(--border);
+    transition: background .3s;
+  }
+  .step-dot.done  { background: var(--green); }
+  .step-dot.active{ background: var(--accent); }
+  .wiz-body { flex: 1; overflow-y: auto; padding: 14px 16px; }
+  .wiz-step { display: none; }
+  .wiz-step.active { display: block; }
+  .wiz-step h3 { font-size:.82rem; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:10px; }
+  .fp-row { margin-bottom: 10px; }
+  .fp-row label { display:block; font-size:.75rem; color:var(--muted); margin-bottom:3px; }
+  .fp-row input, .fp-row select, .fp-row textarea {
+    width: 100%; padding: 6px 9px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg); color: var(--text);
+    font-size: 0.82rem; font-family: inherit;
+  }
+  .fp-row textarea { resize: vertical; min-height: 56px; }
+  .fp-row input:focus, .fp-row select:focus { outline: none; border-color: var(--accent); }
+  .fp-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .fp-actions { padding: 12px 16px; border-top: 1px solid var(--border); display:flex; gap:8px; }
+  .fp-actions button {
+    flex:1; padding:8px; border-radius:7px; border:none; cursor:pointer;
+    font-size:.82rem; font-weight:600; transition: opacity .15s;
+  }
+  .btn-primary   { background: var(--accent); color: #fff; }
+  .btn-secondary { background: var(--bg); border: 1px solid var(--border) !important; color: var(--text); }
+  .btn-success   { background: var(--green); color: #000; }
+  .btn-primary:hover, .btn-secondary:hover, .btn-success:hover { opacity:.85; }
+  .risk-badge {
+    display:inline-block; padding:3px 10px; border-radius:12px;
+    font-size:.75rem; font-weight:700; color:#fff; margin-bottom:8px;
+  }
+  .risk-LOW    { background:#238636; }
+  .risk-MEDIUM { background:#d29922; color:#000; }
+  .risk-HIGH   { background:#da3633; }
+  .hit-list { font-size:.76rem; }
+  .hit-item { padding:5px 8px; margin-bottom:4px; border-radius:6px; background:var(--bg); border:1px solid var(--border); }
+  .hit-item .hit-layer { font-size:.65rem; padding:1px 6px; border-radius:9px; color:#fff; margin-right:5px; }
+  .contact-card {
+    background: var(--bg); border: 1px solid var(--border); border-radius:8px;
+    padding: 10px 12px; margin-bottom:8px; font-size:.8rem;
+  }
+  .contact-card .cc-name { font-weight:700; color:var(--blue); margin-bottom:4px; }
+  .contact-card .cc-row  { display:flex; gap:6px; padding:1px 0; }
+  .contact-card .cc-lbl  { color:var(--muted); min-width:50px; font-size:.72rem; }
+  .draw-hint {
+    background: rgba(233,69,96,.12); border: 1px dashed var(--accent);
+    border-radius:8px; padding:10px 12px; font-size:.8rem;
+    color:var(--text); margin-bottom:10px; text-align:center;
+  }
+  .draw-hint .hint-icon { font-size:1.4rem; display:block; margin-bottom:4px; }
+  #fpCircleInfo { font-size:.76rem; color:var(--muted); margin-top:6px; }
 </style>
 </head>
 <body>
@@ -179,6 +285,11 @@ HTML = b"""<!DOCTYPE html>
   <div class="sb-section">
     <h2>Search</h2>
     <input id="searchBox" type="search" placeholder="Zone ID, ICAO, NOTAM..." autocomplete="off"/>
+  </div>
+
+  <div class="sb-section">
+    <h2>Flight Plan</h2>
+    <button class="fp-launch-btn" onclick="launchFlightPlan()">&#9992; New UAS Notification</button>
   </div>
 
   <div id="stats">Loading layers...</div>
@@ -588,10 +699,403 @@ function closeCross() {
 }
 
 // ========================================================================
+// FLIGHT PLAN WIZARD
+// ========================================================================
+let fpMode = false;   // true = waiting for user to click circle centre
+let fpCircle = null;  // Leaflet circle on map
+let fpCentre = null;  // { lat, lon }
+let fpAreaResult = null; // last area_check response
+
+function launchFlightPlan() {
+  document.getElementById('fpOverlay').style.display = 'block';
+  showStep(1);
+}
+
+function closeFlightPlan() {
+  document.getElementById('fpOverlay').style.display = 'none';
+  fpMode = false;
+  clearFpCircle();
+}
+
+function clearFpCircle() {
+  if (fpCircle) { map.removeLayer(fpCircle); fpCircle = null; }
+  fpCentre = null;
+  document.getElementById('fpCircleInfo').textContent = '';
+}
+
+function showStep(n) {
+  [1,2,3,4].forEach(function(i) {
+    document.getElementById('wizStep' + i).classList.toggle('active', i === n);
+    var dot = document.getElementById('stepDot' + i);
+    if (dot) {
+      dot.className = 'step-dot' + (i < n ? ' done' : i === n ? ' active' : '');
+    }
+  });
+}
+
+// -- Step 1: Place circle --------------------------------------------------
+function enterDrawMode() {
+  fpMode = true;
+  document.getElementById('fpDrawHint').style.display = 'block';
+  document.getElementById('fpCircleInfo').textContent = 'Click anywhere on the map to place the centre...';
+  // Make overlay transparent to clicks on the map side
+  document.getElementById('fpOverlay').style.pointerEvents = 'none';
+  document.getElementById('fpWizard').style.pointerEvents = 'all';
+}
+
+function onMapClickFP(e) {
+  if (!fpMode) return;
+  fpMode = false;
+  fpCentre = { lat: e.latlng.lat, lon: e.latlng.lng };
+  document.getElementById('fpOverlay').style.pointerEvents = 'all';
+  document.getElementById('fpDrawHint').style.display = 'none';
+  document.getElementById('fpLat').value = fpCentre.lat.toFixed(6);
+  document.getElementById('fpLon').value = fpCentre.lon.toFixed(6);
+  updateFpCircle();
+  document.getElementById('fpCircleInfo').textContent =
+    'Centre: ' + fpCentre.lat.toFixed(5) + ', ' + fpCentre.lon.toFixed(5);
+}
+
+function updateFpCircle() {
+  if (!fpCentre) return;
+  var r = parseFloat(document.getElementById('fpRadius').value) || 200;
+  if (fpCircle) map.removeLayer(fpCircle);
+  fpCircle = L.circle([fpCentre.lat, fpCentre.lon], {
+    radius: r,
+    color: '#e94560', fillColor: '#e94560',
+    weight: 2, fillOpacity: 0.18, dashArray: '6 4',
+    interactive: false,
+  }).addTo(map);
+  map.panTo([fpCentre.lat, fpCentre.lon]);
+}
+
+map.on('click', function(e) {
+  onMapClickFP(e);
+});
+
+document.getElementById('fpRadius').addEventListener('input', updateFpCircle);
+
+function checkFpArea() {
+  if (!fpCentre) {
+    alert('Please place the circle centre on the map first.');
+    return;
+  }
+  var radius = parseFloat(document.getElementById('fpRadius').value) || 200;
+  var alt    = parseFloat(document.getElementById('fpAlt').value)    || 120;
+  document.getElementById('fpCheckBtn').textContent = 'Checking...';
+  fetch('/api/area_check?lon=' + fpCentre.lon.toFixed(6) +
+        '&lat='    + fpCentre.lat.toFixed(6) +
+        '&radius=' + radius + '&alt=' + alt)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      fpAreaResult = data;
+      showRiskResults(data);
+      document.getElementById('fpCheckBtn').textContent = 'Check Area';
+      showStep(2);
+    })
+    .catch(function(err) {
+      alert('Area check failed: ' + err);
+      document.getElementById('fpCheckBtn').textContent = 'Check Area';
+    });
+}
+
+// -- Step 2: Risk results --------------------------------------------------
+function showRiskResults(data) {
+  var risk = data.risk_level || 'LOW';
+  document.getElementById('riskBadge').textContent = risk;
+  document.getElementById('riskBadge').className = 'risk-badge risk-' + risk;
+  document.getElementById('riskSummary').textContent = data.summary || '';
+
+  var html = '';
+  function addHits(hits, label, color) {
+    if (!hits || !hits.length) return;
+    hits.forEach(function(h) {
+      var name = h.zone_id || h.notam_id || h.name || h.arsp_name || label;
+      var alt = (h.lower_limit_m != null && h.upper_limit_m != null)
+        ? ' (' + Math.round(h.lower_limit_m) + '-' + Math.round(h.upper_limit_m) + ' m)'
+        : '';
+      html += '<div class="hit-item"><span class="hit-layer" style="background:' + color + '">' +
+        label + '</span>' + name + '<span style="color:var(--muted)">' + alt + '</span></div>';
+    });
+  }
+  addHits(data.ctr_hits,   'CTR',      '#58a6ff');
+  addHits(data.uas_hits,   'UAS Zone', '#e94560');
+  addHits(data.notam_hits, 'NOTAM',    '#ff9800');
+  addHits(data.tma_hits,   'TMA',      '#3fb950');
+
+  document.getElementById('riskHits').innerHTML = html || '<div style="color:var(--muted);font-size:.8rem">No conflicting zones found.</div>';
+
+  // Auto-fill TWR field from first CTR hit
+  if (data.tower_contacts && data.tower_contacts.length > 0) {
+    var tc = data.tower_contacts[0];
+    if (tc.icao) document.getElementById('fpTwr').value = tc.icao;
+  }
+}
+
+// -- Step 3: Form prefill & generate PDF ----------------------------------
+function generatePdf() {
+  var centre = fpCentre || { lat: 0, lon: 0 };
+  var radius = parseFloat(document.getElementById('fpRadius').value) || 200;
+
+  var payload = {
+    operator:      document.getElementById('fp_operator').value,
+    date_contact:  document.getElementById('fp_address').value,
+    email:         document.getElementById('fp_email').value,
+    mobil:         document.getElementById('fp_mobil').value,
+    inmatriculare: document.getElementById('fp_reg').value,
+    greutate:      document.getElementById('fp_weight').value,
+    clasa:         document.getElementById('fp_class').value,
+    categorie:     document.getElementById('fp_cat').value,
+    mod_operare:   document.getElementById('fp_mode').value,
+    twr:           document.getElementById('fpTwr').value,
+    pilot_name:    document.getElementById('fp_pilot').value,
+    pilot_phone:   document.getElementById('fp_pphone').value,
+    scop_zbor:     document.getElementById('fp_purpose').value,
+    alt_max_m:     document.getElementById('fpAlt').value,
+    data_start:    document.getElementById('fp_date1').value,
+    data_end:      document.getElementById('fp_date2').value,
+    ora_start:     document.getElementById('fp_time1').value,
+    ora_end:       document.getElementById('fp_time2').value,
+    localitatea:   document.getElementById('fp_loc').value,
+    center_lon:    centre.lon,
+    center_lat:    centre.lat,
+    radius_m:      radius,
+  };
+
+  document.getElementById('fpGenBtn').textContent = 'Generating...';
+
+  fetch('/api/generate_pdf', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  .then(function(r) {
+    if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || 'Server error'); });
+    return r.blob();
+  })
+  .then(function(blob) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'ANEXA1_filled.pdf';
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    document.getElementById('fpGenBtn').textContent = 'Download PDF';
+    showStep(4);
+    showContactInfo();
+  })
+  .catch(function(err) {
+    alert('PDF generation failed: ' + err.message);
+    document.getElementById('fpGenBtn').textContent = 'Download PDF';
+  });
+}
+
+// -- Step 4: Contact info --------------------------------------------------
+function showContactInfo() {
+  var contacts = fpAreaResult && fpAreaResult.tower_contacts ? fpAreaResult.tower_contacts : [];
+  var selectedTwr = document.getElementById('fpTwr').value;
+  var html = '';
+
+  // Show all hit contacts, plus the selected TWR if not in hits
+  var shown = new Set();
+  contacts.forEach(function(c) {
+    if (!c.icao) return;
+    shown.add(c.icao);
+    html += buildContactCard(c);
+  });
+
+  // If user manually selected a different TWR, also show that
+  if (selectedTwr && !shown.has(selectedTwr) && window._towerData && window._towerData[selectedTwr]) {
+    html += buildContactCard(Object.assign({icao: selectedTwr}, window._towerData[selectedTwr]));
+  }
+
+  if (!html) {
+    html = '<div style="color:var(--muted);font-size:.8rem">No CTR detected. ' +
+      'Submit via <a href="https://flightplan.romatsa.ro" target="_blank" style="color:var(--blue)">flightplan.romatsa.ro</a></div>';
+  }
+  document.getElementById('contactCards').innerHTML = html;
+}
+
+function buildContactCard(c) {
+  var phones = (c.phone || []).join(', ');
+  var emailLink = c.email
+    ? '<a href="' + buildMailto(c) + '" style="color:var(--blue)">' + c.email + '</a>'
+    : '-';
+  var note = c.note ? '<div style="color:var(--orange);font-size:.7rem;margin-top:4px">' + c.note + '</div>' : '';
+  return '<div class="contact-card">' +
+    '<div class="cc-name">' + (c.icao || '') + ' - ' + (c.name || '') + '</div>' +
+    '<div class="cc-row"><span class="cc-lbl">Phone</span><span>' + phones + '</span></div>' +
+    '<div class="cc-row"><span class="cc-lbl">Email</span><span>' + emailLink + '</span></div>' +
+    note +
+    '</div>';
+}
+
+function buildMailto(c) {
+  var subject = encodeURIComponent('Notificare operare UAS in CTR ' + (c.icao || ''));
+  var nl = '\\n';
+  var body = encodeURIComponent(
+    'Buna ziua,' + nl + nl + 'Va transmit atasat Anexa 1 pentru operarea UAS in CTR ' + (c.icao || '') + '.' + nl + nl
+    + 'Locatia: ' + (document.getElementById('fp_loc').value || 'N/A') + nl
+    + 'Data: ' + (document.getElementById('fp_date1').value || 'N/A') + nl
+    + 'Altitudine maxima: ' + (document.getElementById('fpAlt').value || 'N/A') + ' m' + nl + nl
+    + 'Cu stima,' + nl + (document.getElementById('fp_operator').value || '')
+  );
+  return 'mailto:' + (c.email || '') + '?subject=' + subject + '&body=' + body;
+}
+
+function openRomatsaPortal() {
+  window.open('https://flightplan.romatsa.ro', '_blank');
+}
+
+// ========================================================================
 // BOOT
 // ========================================================================
 loadAllLayers();
 </script>
+
+<!-- ======================================================================
+     FLIGHT PLAN WIZARD MODAL
+     ====================================================================== -->
+<div id="fpOverlay">
+  <div id="fpWizard">
+    <div class="wiz-head">
+      <h2>&#9992; UAS Flight Notification (ANEXA 1)</h2>
+      <button class="close-wiz" onclick="closeFlightPlan()">&times;</button>
+    </div>
+    <div class="step-indicator">
+      <div class="step-dot active" id="stepDot1"></div>
+      <div class="step-dot" id="stepDot2"></div>
+      <div class="step-dot" id="stepDot3"></div>
+      <div class="step-dot" id="stepDot4"></div>
+    </div>
+    <div class="wiz-body">
+
+      <!-- Step 1: Define area -->
+      <div class="wiz-step active" id="wizStep1">
+        <h3>Step 1 &ndash; Define Flight Area</h3>
+        <div class="draw-hint" id="fpDrawHint" style="display:none">
+          <span class="hint-icon">&#128205;</span>
+          Click on the map to place the circle centre
+        </div>
+        <div class="fp-2col">
+          <div class="fp-row">
+            <label>Latitude</label>
+            <input id="fpLat" type="number" step="0.000001" placeholder="44.4268"/>
+          </div>
+          <div class="fp-row">
+            <label>Longitude</label>
+            <input id="fpLon" type="number" step="0.000001" placeholder="26.1025"/>
+          </div>
+        </div>
+        <div class="fp-row">
+          <label>Radius (metres)</label>
+          <input id="fpRadius" type="number" min="50" max="5000" value="200"/>
+        </div>
+        <div class="fp-row">
+          <label>Max Altitude AGL (m)</label>
+          <input id="fpAlt" type="number" min="0" max="120" value="120"/>
+        </div>
+        <div id="fpCircleInfo" style="font-size:.75rem;color:var(--muted);margin-top:6px"></div>
+      </div>
+
+      <!-- Step 2: Risk results -->
+      <div class="wiz-step" id="wizStep2">
+        <h3>Step 2 &ndash; Airspace Risk</h3>
+        <div id="riskBadge" class="risk-badge risk-LOW">LOW</div>
+        <div id="riskSummary" style="font-size:.8rem;margin-bottom:8px;color:var(--muted)"></div>
+        <div id="riskHits" class="hit-list"></div>
+      </div>
+
+      <!-- Step 3: Flight plan form -->
+      <div class="wiz-step" id="wizStep3">
+        <h3>Step 3 &ndash; Flight Plan Details</h3>
+        <div class="fp-row"><label>CTR (TWR)</label>
+          <select id="fpTwr">
+            <option value="LRAR">Arad - LRAR</option>
+            <option value="LRBC">Bacau - LRBC</option>
+            <option value="LRBM">Baia Mare - LRBM</option>
+            <option value="LRBV">Brasov - LRBV</option>
+            <option value="LRBS">Bucuresti Baneasa - LRBS</option>
+            <option value="LROP">Bucuresti Otopeni - LROP</option>
+            <option value="LRCL">Cluj-Napoca - LRCL</option>
+            <option value="LRCK">Constanta - LRCK</option>
+            <option value="LRCV">Craiova - LRCV</option>
+            <option value="LRIA">Iasi - LRIA</option>
+            <option value="LROD">Oradea - LROD</option>
+            <option value="LRSM">Satu Mare - LRSM</option>
+            <option value="LRSB">Sibiu - LRSB</option>
+            <option value="LRSV">Suceava - LRSV</option>
+            <option value="LRTM">Targu Mures - LRTM</option>
+            <option value="LRTR">Timisoara - LRTR</option>
+            <option value="LRTC">Tulcea - LRTC</option>
+          </select>
+        </div>
+        <div class="fp-row"><label>Operator Name</label><input id="fp_operator" type="text"/></div>
+        <div class="fp-row"><label>Address / Contact</label><textarea id="fp_address" rows="2"></textarea></div>
+        <div class="fp-2col">
+          <div class="fp-row"><label>Email</label><input id="fp_email" type="email"/></div>
+          <div class="fp-row"><label>Mobile</label><input id="fp_mobil" type="tel"/></div>
+        </div>
+        <div class="fp-2col">
+          <div class="fp-row"><label>UAS Registration</label><input id="fp_reg" type="text"/></div>
+          <div class="fp-row"><label>MTOM (kg)</label><input id="fp_weight" type="text"/></div>
+        </div>
+        <div class="fp-2col">
+          <div class="fp-row"><label>Class</label>
+            <select id="fp_class">
+              <option value="PRV250">Private &lt;250g</option>
+              <option value="C0">C0 &lt;250g</option>
+              <option value="C2" selected>C2 900g-4kg</option>
+              <option value="C3">C3 &lt;25kg</option>
+            </select>
+          </div>
+          <div class="fp-row"><label>Category</label>
+            <select id="fp_cat">
+              <option value="A1">A1</option>
+              <option value="A2" selected>A2</option>
+              <option value="A3">A3</option>
+            </select>
+          </div>
+        </div>
+        <div class="fp-row"><label>Operation Mode</label>
+          <select id="fp_mode">
+            <option value="VLOS" selected>VLOS</option>
+            <option value="VBLOS">BVLOS</option>
+          </select>
+        </div>
+        <div class="fp-row"><label>Pilot Name</label><input id="fp_pilot" type="text"/></div>
+        <div class="fp-row"><label>Pilot Phone</label><input id="fp_pphone" type="tel"/></div>
+        <div class="fp-row"><label>Flight Purpose</label><textarea id="fp_purpose" rows="2"></textarea></div>
+        <div class="fp-row"><label>Location Name</label><input id="fp_loc" type="text"/></div>
+        <div class="fp-2col">
+          <div class="fp-row"><label>Start Date (DD.MM.YYYY)</label><input id="fp_date1" type="text" placeholder="01.06.2025"/></div>
+          <div class="fp-row"><label>End Date</label><input id="fp_date2" type="text" placeholder="01.06.2025"/></div>
+        </div>
+        <div class="fp-2col">
+          <div class="fp-row"><label>Start Time (UTC)</label><input id="fp_time1" type="text" placeholder="08:00"/></div>
+          <div class="fp-row"><label>End Time (UTC)</label><input id="fp_time2" type="text" placeholder="10:00"/></div>
+        </div>
+      </div>
+
+      <!-- Step 4: Contact & submit -->
+      <div class="wiz-step" id="wizStep4">
+        <h3>Step 4 &ndash; Send to ROMATSA</h3>
+        <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px">
+          Your ANEXA 1 PDF has been downloaded. Send it to the responsible TWR unit:
+        </p>
+        <div id="contactCards"></div>
+        <div style="font-size:.75rem;color:var(--muted);margin-top:8px">
+          Or submit online at
+          <a href="https://flightplan.romatsa.ro" target="_blank" style="color:var(--blue)">flightplan.romatsa.ro</a>
+          (registration required)
+        </div>
+      </div>
+
+    </div><!-- .wiz-body -->
+    <div class="fp-actions" id="fpActions"></div>
+  </div><!-- #fpWizard -->
+</div><!-- #fpOverlay -->
+
 </body>
 </html>
 """
@@ -698,6 +1202,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, "application/json",
                            json.dumps({"error": str(exc)}).encode())
 
+        elif path == "/api/area_check":
+            try:
+                lon    = float(qs.get("lon",    [0])[0])
+                lat    = float(qs.get("lat",    [0])[0])
+                radius = float(qs.get("radius", [200])[0])
+                alt    = float(qs.get("alt",    [120])[0])
+                if _area_check is None:
+                    raise RuntimeError("flight_plan_manager not loaded")
+                result = _area_check(lon, lat, radius, alt)
+                self._send(200, "application/json; charset=utf-8",
+                           json.dumps(result, ensure_ascii=False).encode())
+            except Exception as exc:
+                self._send(500, "application/json",
+                           json.dumps({"error": str(exc)}).encode())
+
         elif path.startswith("/api/"):
             layer_key = path[len("/api/"):].rstrip("/")
             fpath = LAYER_FILES.get(layer_key)
@@ -719,6 +1238,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path   = parsed.path
+        length = int(self.headers.get("Content-Length", 0))
+        raw    = self.rfile.read(length) if length else b"{}"
+
+        if path == "/api/generate_pdf":
+            try:
+                data = json.loads(raw)
+                if _fill_anexa1 is None:
+                    raise RuntimeError("flight_plan_manager not loaded")
+                template = Path("/home/vlad/Downloads/ANEXA1.pdf")
+                if not template.exists():
+                    raise FileNotFoundError(f"ANEXA1.pdf not found at {template}")
+                out_path = Path("/tmp/anexa1_filled.pdf")
+                _fill_anexa1(template, out_path, data)
+                pdf_bytes = out_path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type",        "application/pdf")
+                self.send_header("Content-Length",       str(len(pdf_bytes)))
+                self.send_header("Content-Disposition", 'attachment; filename="ANEXA1_filled.pdf"')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(pdf_bytes)
+            except Exception as exc:
+                self._send(500, "application/json",
+                           json.dumps({"error": str(exc)}).encode())
+        else:
+            self._send(404, "text/plain", b"Not found")
 
 
 # ──────────────────────────────────────────────────────────────────────────
