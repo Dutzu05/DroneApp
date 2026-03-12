@@ -322,6 +322,42 @@ let mapLayers = {};
 let rawData   = {};
 let allFeatureIndex = [];
 
+function mercatorToLngLat(x, y) {
+  var lng = (x / 20037508.34) * 180.0;
+  var lat = (y / 20037508.34) * 180.0;
+  lat = 180.0 / Math.PI * (2.0 * Math.atan(Math.exp(lat * Math.PI / 180.0)) - Math.PI / 2.0);
+  return [lng, lat];
+}
+
+function normalizeCoords(coords) {
+  if (!Array.isArray(coords) || !coords.length) return coords;
+  if (typeof coords[0] === 'number') {
+    var x = coords[0], y = coords[1];
+    if (Math.abs(x) > 180 || Math.abs(y) > 90) {
+      return mercatorToLngLat(x, y);
+    }
+    return coords;
+  }
+  return coords.map(normalizeCoords);
+}
+
+function normalizeGeoJSON(geojson) {
+  if (!geojson || !geojson.features) return geojson;
+  return {
+    type: geojson.type,
+    features: geojson.features.map(function(feat) {
+      return {
+        type: feat.type,
+        properties: feat.properties || {},
+        geometry: feat.geometry ? {
+          type: feat.geometry.type,
+          coordinates: normalizeCoords(feat.geometry.coordinates)
+        } : null
+      };
+    })
+  };
+}
+
 // ========================================================================
 // MAP INIT
 // ========================================================================
@@ -360,8 +396,13 @@ async function loadAllLayers() {
 
   results.forEach(r => {
     if (!r) return;
-    rawData[r.key] = r.data;
-    buildMapLayer(r.key, r.data);
+    try {
+      var normalized = normalizeGeoJSON(r.data);
+      rawData[r.key] = normalized;
+      buildMapLayer(r.key, normalized);
+    } catch (e) {
+      console.error('Failed to build layer', r.key, e);
+    }
   });
 
   buildLayerToggles();
@@ -773,7 +814,12 @@ map.on('click', function(e) {
   onMapClickFP(e);
 });
 
-document.getElementById('fpRadius').addEventListener('input', updateFpCircle);
+window.addEventListener('load', function() {
+  var fpRadiusInput = document.getElementById('fpRadius');
+  if (fpRadiusInput) {
+    fpRadiusInput.addEventListener('input', updateFpCircle);
+  }
+});
 
 function checkFpArea() {
   if (!fpCentre) {
