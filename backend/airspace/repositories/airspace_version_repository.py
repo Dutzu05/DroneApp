@@ -6,6 +6,22 @@ from backend.airspace.repositories.db import get_connection
 
 
 class AirspaceVersionRepository:
+    def has_active_version(self, *, source: str, conn=None) -> bool:
+        if conn is not None:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1
+                FROM airspace_versions
+                WHERE source = %s AND is_active = TRUE
+                LIMIT 1
+                """,
+                (source,),
+            )
+            return cur.fetchone() is not None
+        with get_connection() as managed_conn:
+            return self.has_active_version(source=source, conn=managed_conn)
+
     def find_active_by_checksum(self, *, source: str, checksum: str, conn=None) -> dict | None:
         if conn is not None:
             cur = conn.cursor()

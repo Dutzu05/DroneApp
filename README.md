@@ -37,14 +37,16 @@
 3. `../.tooling/flutter/bin/flutter run`
 4. for frontend .venv/bin/python scripts/visualise_zones.py --no-browser
 
-## Google Login + Logged Accounts Viewer
+## Google Login + Admin Dashboard
 - Google client ID used by the browser frontend and Flutter app:
   - `1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com`
 - Frontend map page now opens behind a Google login gate:
   - `http://localhost:5174/`
 - Backend endpoint used by mobile app to register logins:
   - `POST /api/auth/google-session`
-- Admin page showing logged accounts:
+- Unified admin dashboard:
+  - `http://localhost:5174/admin`
+- Legacy login audit URL:
   - `http://localhost:5174/admin/logged-accounts`
 - Login history is persisted here:
   - `.data/logged_accounts.json`
@@ -56,8 +58,10 @@
   - `POST /api/flight-plans/assess`
   - `POST /api/flight-plans`
   - `GET /api/flight-plans?scope=mine&include_past=1`
-- Admin page showing all stored flight plans and who created them:
+- Legacy flight plan admin URL:
   - `http://localhost:5174/admin/flight-plans`
+- Admin overview API used by the dashboard:
+  - `GET /api/admin/overview`
 - Generated PDFs are stored here:
   - `.data/flight_plans/`
 

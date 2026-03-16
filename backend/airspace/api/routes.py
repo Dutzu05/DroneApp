@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.airspace.api.schemas import CheckRouteRequest, PointCheckResponse, RouteCheckResponse, ZonesEnvelopeResponse
-from backend.airspace.services.airspace_query_service import AirspaceQueryService
+from backend.airspace.services.airspace_query_service import AirspaceQueryService, normalize_categories
 from backend.airspace.services.route_check_service import RouteCheckService
 
 
@@ -22,12 +22,20 @@ def build_airspace_router(query_service: AirspaceQueryService, route_service: Ro
     router = APIRouter(prefix='/airspace', tags=['airspace'])
 
     @router.get('/zones', response_model=ZonesEnvelopeResponse)
-    def get_zones(bbox: str = Query(..., description='minLon,minLat,maxLon,maxLat')):
-        return query_service.get_zones_in_bbox(_parse_bbox(bbox))
+    def get_zones(
+        bbox: str = Query(..., description='minLon,minLat,maxLon,maxLat'),
+        categories: str | None = Query(None, description='Comma-separated: ctr,tma,notam,restricted'),
+    ):
+        return query_service.get_zones_in_bbox(_parse_bbox(bbox), categories=normalize_categories(categories))
 
     @router.get('/zones/near', response_model=ZonesEnvelopeResponse)
-    def get_zones_near(lat: float, lon: float, radius_km: float = 10.0):
-        return query_service.get_zones_near(lat=lat, lon=lon, radius_km=radius_km)
+    def get_zones_near(
+        lat: float,
+        lon: float,
+        radius_km: float = 10.0,
+        categories: str | None = Query(None, description='Comma-separated: ctr,tma,notam,restricted'),
+    ):
+        return query_service.get_zones_near(lat=lat, lon=lon, radius_km=radius_km, categories=normalize_categories(categories))
 
     @router.get('/check-point', response_model=PointCheckResponse)
     def check_point(lat: float, lon: float, alt_m: float | None = None):

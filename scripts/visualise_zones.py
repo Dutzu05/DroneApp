@@ -38,6 +38,7 @@ import os
 import threading
 import time
 import sys
+import uuid
 import webbrowser
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -49,6 +50,12 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from modules.auth.module import build_auth_module
+from backend.airspace.ingestion.pipeline import SOURCES as AIRSPACE_INGESTION_SOURCES
+from backend.airspace.repositories.admin_repository import AirspaceAdminRepository
+from backend.airspace.services.airspace_query_service import (
+    build_airspace_query_service,
+    normalize_categories as _normalize_airspace_categories,
+)
 from modules.flight_plans.module import build_flight_plans_module
 from backend_auth import (
     clear_session_cookie_header,
@@ -109,6 +116,8 @@ GOOGLE_WEB_CLIENT_ID = os.environ.get(
     "DRONE_GOOGLE_WEB_CLIENT_ID",
     "1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com",
 )
+AIRSPACE_QUERY_SERVICE = build_airspace_query_service()
+AIRSPACE_ADMIN_REPO = AirspaceAdminRepository()
 
 LAYER_FILES = {
     "uas_zones":    ASSET_DIR / "restriction_zones.geojson",
@@ -296,6 +305,416 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
 
     loadRows();
     setInterval(loadRows, 10000);
+  </script>
+</body>
+</html>
+"""
+
+ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"UTF-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+  <title>Drone Backend - Admin</title>
+  <style>
+    :root {
+      --bg: #0f141c;
+      --panel: #171d28;
+      --panel-alt: #111722;
+      --line: #2a3444;
+      --text: #edf2f8;
+      --muted: #93a1b5;
+      --accent: #58a6ff;
+      --ok: #238636;
+      --warn: #d29922;
+      --danger: #da3633;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .page { padding: 20px; max-width: 1800px; margin: 0 auto; }
+    .toolbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+    .toolbar h1 { margin: 0 0 6px 0; font-size: 28px; }
+    .muted { color: var(--muted); }
+    .links a { color: var(--accent); text-decoration: none; margin-left: 12px; }
+    .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .summary-card { background: linear-gradient(180deg, #1a2230 0%, #141b26 100%); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+    .summary-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+    .summary-card .value { font-size: 28px; font-weight: 700; }
+    .summary-card .sub { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .panel-grid { display: grid; grid-template-columns: 1.1fr 1.3fr 1.1fr; gap: 14px; align-items: start; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; min-height: 280px; }
+    .panel .head { padding: 14px 16px; background: var(--panel-alt); border-bottom: 1px solid var(--line); }
+    .panel .head h2 { margin: 0 0 4px 0; font-size: 18px; }
+    .panel .body { padding: 0; }
+    .table-wrap { overflow: auto; max-height: 540px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 12px; text-align: left; font-size: 13px; vertical-align: top; }
+    th { position: sticky; top: 0; background: #1a2230; z-index: 1; }
+    .empty { color: var(--muted); padding: 18px; text-align: center; }
+    .badge { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+    .badge.ok, .badge.ongoing, .badge.upcoming, .badge.low, .badge.activated { background: rgba(35, 134, 54, .18); color: #67d480; }
+    .badge.warn, .badge.medium, .badge.duplicate, .badge.completed { background: rgba(210, 153, 34, .18); color: #f2c94c; }
+    .badge.danger, .badge.high, .badge.cancelled, .badge.failed, .badge.error { background: rgba(218, 54, 51, .18); color: #ff8e8a; }
+    .badge.info, .badge.planned { background: rgba(88, 166, 255, .18); color: #85c1ff; }
+    .stack { display: flex; flex-direction: column; gap: 4px; }
+    .small { font-size: 12px; color: var(--muted); }
+    .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    .mono { font-family: monospace; word-break: break-all; }
+    a { color: var(--accent); }
+    @media (max-width: 1280px) {
+      .panel-grid, .summary-grid, .bottom-grid { grid-template-columns: 1fr; }
+      .table-wrap { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class=\"page\">
+    <div class=\"toolbar\">
+      <div>
+        <h1>Admin Dashboard</h1>
+        <div class=\"muted\">Operational view of authenticated users, flight plans, and airspace ingestion state.</div>
+      </div>
+      <div class=\"links muted\">
+        <span id=\"refreshLabel\">Auto-refresh every 10 seconds</span>
+        <a href=\"/\">Map</a>
+        <a href=\"/admin/logged-accounts\">Logins</a>
+        <a href=\"/admin/flight-plans\">Flight Plans</a>
+      </div>
+    </div>
+
+    <div class=\"summary-grid\">
+      <div class=\"summary-card\">
+        <div class=\"label\">Recorded Logins</div>
+        <div class=\"value\" id=\"summaryAccounts\">0</div>
+        <div class=\"sub\" id=\"summaryAccountsSub\">No logins recorded yet</div>
+      </div>
+      <div class=\"summary-card\">
+        <div class=\"label\">Stored Flight Plans</div>
+        <div class=\"value\" id=\"summaryPlans\">0</div>
+        <div class=\"sub\" id=\"summaryPlansSub\">No flight plans stored yet</div>
+      </div>
+      <div class=\"summary-card\">
+        <div class=\"label\">Active Airspace Sources</div>
+        <div class=\"value\" id=\"summarySources\">0</div>
+        <div class=\"sub\" id=\"summarySourcesSub\">No active airspace datasets</div>
+      </div>
+      <div class=\"summary-card\">
+        <div class=\"label\">Recent Ingestion Issues</div>
+        <div class=\"value\" id=\"summaryIssues\">0</div>
+        <div class=\"sub\" id=\"summaryIssuesSub\">No recent issues</div>
+      </div>
+    </div>
+
+    <div class=\"panel-grid\">
+      <section class=\"panel\">
+        <div class=\"head\">
+          <h2>Logged Accounts</h2>
+          <div class=\"muted\" id=\"accountsCaption\"></div>
+        </div>
+        <div class=\"body table-wrap\">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Name</th>
+                <th>Last Seen</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody id=\"accountsRows\"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class=\"panel\">
+        <div class=\"head\">
+          <h2>Flight Plans</h2>
+          <div class=\"muted\" id=\"plansCaption\"></div>
+        </div>
+        <div class=\"body table-wrap\">
+          <table>
+            <thead>
+              <tr>
+                <th>Plan</th>
+                <th>Owner</th>
+                <th>Schedule</th>
+                <th>Risk</th>
+              </tr>
+            </thead>
+            <tbody id=\"plansRows\"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class=\"panel\">
+        <div class=\"head\">
+          <h2>Airspace Datasets</h2>
+          <div class=\"muted\" id=\"airspaceCaption\"></div>
+        </div>
+        <div class=\"body table-wrap\">
+          <table>
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Last Ingestion</th>
+                <th>Features</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id=\"airspaceRows\"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div class=\"bottom-grid\">
+      <section class=\"panel\">
+        <div class=\"head\">
+          <h2>Active Airspace Versions</h2>
+          <div class=\"muted\">Currently active dataset versions used by viewport rendering and checks.</div>
+        </div>
+        <div class=\"body table-wrap\">
+          <table>
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Version</th>
+                <th>Imported</th>
+                <th>Features</th>
+                <th>Checksum</th>
+              </tr>
+            </thead>
+            <tbody id=\"versionsRows\"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class=\"panel\">
+        <div class=\"head\">
+          <h2>Recent Ingestion Events</h2>
+          <div class=\"muted\">Recent raw fetch attempts and any issues that need operator attention.</div>
+        </div>
+        <div class=\"body table-wrap\">
+          <table>
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Fetched At</th>
+                <th>Status</th>
+                <th>Checksum</th>
+              </tr>
+            </thead>
+            <tbody id=\"eventsRows\"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    function formatValue(value, fallback) {
+      return value == null || value === '' ? (fallback || '-') : value;
+    }
+
+    function shortChecksum(value) {
+      if (!value) return '-';
+      return value.slice(0, 12);
+    }
+
+    function badge(label, klass) {
+      return `<span class=\"badge ${klass}\">${label}</span>`;
+    }
+
+    function statusBadge(value) {
+      const normalized = String(value || 'unknown').toLowerCase();
+      if (normalized === 'activated' || normalized === 'ongoing' || normalized === 'upcoming' || normalized === 'low') {
+        return badge(value, 'ok');
+      }
+      if (normalized === 'duplicate' || normalized === 'completed' || normalized === 'medium') {
+        return badge(value, 'warn');
+      }
+      if (normalized === 'failed' || normalized === 'error' || normalized === 'cancelled' || normalized === 'high') {
+        return badge(value, 'danger');
+      }
+      return badge(value, 'info');
+    }
+
+    function renderEmpty(tbody, colspan, message) {
+      tbody.innerHTML = `<tr><td class=\"empty\" colspan=\"${colspan}\">${message}</td></tr>`;
+    }
+
+    function renderAccounts(accounts) {
+      document.getElementById('summaryAccounts').textContent = String(accounts.length);
+      document.getElementById('summaryAccountsSub').textContent =
+        accounts.length ? `Last seen ${formatValue(accounts[0].last_seen_at, 'n/a')}` : 'No logins recorded yet';
+      document.getElementById('accountsCaption').textContent =
+        `${accounts.length} account${accounts.length === 1 ? '' : 's'} recorded`;
+      const rows = document.getElementById('accountsRows');
+      if (!accounts.length) {
+        renderEmpty(rows, 4, 'No Google logins recorded yet.');
+        return;
+      }
+      rows.innerHTML = accounts.map(function(a) {
+        return `
+          <tr>
+            <td class=\"stack\"><strong>${formatValue(a.email)}</strong><span class=\"small\">${formatValue(a.google_user_id)}</span></td>
+            <td>${formatValue(a.display_name)}</td>
+            <td class=\"stack\"><span>${formatValue(a.last_seen_at)}</span><span class=\"small\">IP ${formatValue(a.last_ip)}</span></td>
+            <td>${formatValue(a.source_app)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderFlightPlans(plans) {
+      document.getElementById('summaryPlans').textContent = String(plans.length);
+      const activeCount = plans.filter(function(plan) {
+        const state = String(plan.runtime_state || '').toLowerCase();
+        return state === 'ongoing' || state === 'upcoming';
+      }).length;
+      document.getElementById('summaryPlansSub').textContent =
+        `${activeCount} active or upcoming`;
+      document.getElementById('plansCaption').textContent =
+        `${plans.length} stored flight plan${plans.length === 1 ? '' : 's'}`;
+      const rows = document.getElementById('plansRows');
+      if (!plans.length) {
+        renderEmpty(rows, 4, 'No flight plans stored yet.');
+        return;
+      }
+      rows.innerHTML = plans.map(function(plan) {
+        const runtimeState = String(plan.runtime_state || 'upcoming').toLowerCase();
+        const workflowState = String(plan.workflow_status || 'planned').toLowerCase();
+        const riskLevel = String(plan.risk_level || 'LOW');
+        const pdfLink = plan.public_id
+          ? `<a href=\"/api/flight-plans/${plan.public_id}\" target=\"_blank\"></a>`
+          : '';
+        return `
+          <tr>
+            <td class=\"stack\">
+              <strong>${formatValue(plan.public_id)}</strong>
+              <span>${statusBadge(runtimeState)} ${statusBadge(workflowState)}</span>
+              <span class=\"small\">${formatValue(plan.location_name)}</span>
+            </td>
+            <td class=\"stack\">
+              <span>${formatValue(plan.owner_display_name || plan.owner_email)}</span>
+              <span class=\"small\">${formatValue(plan.owner_email)}</span>
+            </td>
+            <td class=\"stack\">
+              <span>${formatValue(plan.scheduled_start_local)}</span>
+              <span class=\"small\">until ${formatValue(plan.scheduled_end_local)}</span>
+            </td>
+            <td class=\"stack\">
+              <span>${statusBadge(riskLevel)}</span>
+              <span class=\"small\">${formatValue(plan.risk_summary)}</span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderAirspace(airspace) {
+      const sources = airspace.sources || [];
+      const versions = airspace.active_versions || [];
+      const events = airspace.recent_events || [];
+      const issues = airspace.recent_issues || [];
+      const latestSource = sources.reduce(function(current, item) {
+        if (!current) return item;
+        return String(item.last_ingested_at || '') > String(current.last_ingested_at || '') ? item : current;
+      }, null);
+
+      document.getElementById('summarySources').textContent = String(sources.length);
+      document.getElementById('summarySourcesSub').textContent =
+        latestSource ? `Latest active import ${formatValue(latestSource.last_ingested_at, 'n/a')}` : 'No active airspace datasets';
+      document.getElementById('summaryIssues').textContent = String(issues.length);
+      document.getElementById('summaryIssuesSub').textContent =
+        issues.length ? `Last issue ${formatValue(issues[0].fetched_at, 'n/a')}` : 'No recent issues';
+      document.getElementById('airspaceCaption').textContent =
+        `${sources.length} active source${sources.length === 1 ? '' : 's'}`;
+
+      const sourceRows = document.getElementById('airspaceRows');
+      if (!sources.length) {
+        renderEmpty(sourceRows, 4, 'No active airspace datasets yet.');
+      } else {
+        sourceRows.innerHTML = sources.map(function(source) {
+          const issueText = source.error_count > 0 ? ` / ${source.error_count} recent issue(s)` : '';
+          return `
+            <tr>
+              <td class=\"stack\">
+                <strong>${formatValue(source.label || source.source)}</strong>
+                <span class=\"small mono\">${formatValue(source.source)}</span>
+              </td>
+              <td class=\"stack\">
+                <span>${formatValue(source.last_ingested_at)}</span>
+                <span class=\"small\">schedule ${formatValue(source.schedule_label)}</span>
+              </td>
+              <td class=\"stack\">
+                <span>${formatValue(source.record_count, 0)}</span>
+                <span class=\"small\">active features</span>
+              </td>
+              <td class=\"stack\">
+                <span>${statusBadge(source.last_status || 'unknown')}</span>
+                <span class=\"small\">${formatValue(source.last_fetch_at)}${issueText}</span>
+              </td>
+            </tr>
+          `;
+        }).join('');
+      }
+
+      const versionRows = document.getElementById('versionsRows');
+      if (!versions.length) {
+        renderEmpty(versionRows, 5, 'No active dataset versions yet.');
+      } else {
+        versionRows.innerHTML = versions.map(function(version) {
+          return `
+            <tr>
+              <td>${formatValue(version.source)}</td>
+              <td class=\"mono\">${formatValue(version.version_id)}</td>
+              <td>${formatValue(version.imported_at)}</td>
+              <td>${formatValue(version.zone_count, 0)}</td>
+              <td class=\"mono\">${shortChecksum(version.checksum)}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+
+      const eventRows = document.getElementById('eventsRows');
+      if (!events.length) {
+        renderEmpty(eventRows, 4, 'No ingestion events stored yet.');
+      } else {
+        eventRows.innerHTML = events.map(function(event) {
+          return `
+            <tr>
+              <td>${formatValue(event.source)}</td>
+              <td>${formatValue(event.fetched_at)}</td>
+              <td>${statusBadge(event.status || 'unknown')}</td>
+              <td class=\"mono\">${shortChecksum(event.checksum)}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+
+    async function loadDashboard() {
+      const res = await fetch('/api/admin/overview');
+      if (!res.ok) {
+        throw new Error('Failed to load admin overview');
+      }
+      const data = await res.json();
+      renderAccounts(data.accounts || []);
+      renderFlightPlans(data.flight_plans || []);
+      renderAirspace(data.airspace || {});
+      document.getElementById('refreshLabel').textContent =
+        `Auto-refresh every 10 seconds | Last refresh ${new Date().toLocaleTimeString()}`;
+    }
+
+    loadDashboard().catch(function(err) {
+      console.error(err);
+    });
+    setInterval(function() {
+      loadDashboard().catch(function(err) {
+        console.error(err);
+      });
+    }, 10000);
   </script>
 </body>
 </html>
@@ -1008,12 +1427,18 @@ dark.addTo(map);
 L.control.layers({ 'Dark': dark, 'Street': osm, 'Satellite': sat }, null, { position: 'topright' }).addTo(map);
 
 let crossMarker = null;
+const DYNAMIC_AIRSPACE_LAYER_KEYS = ['uas_zones', 'notam', 'ctr', 'tma'];
+const AIRSPACE_CATEGORY_FILTERS = ['ctr', 'tma', 'notam', 'restricted'];
+let airspaceViewportRefreshTimer = null;
+let airspaceViewportRequestId = 0;
 
 // ========================================================================
 // LAYER LOADING
 // ========================================================================
 async function loadAllLayers() {
-  const keys = Object.keys(LAYERS_CFG);
+  const keys = Object.keys(LAYERS_CFG).filter(function(key) {
+    return DYNAMIC_AIRSPACE_LAYER_KEYS.indexOf(key) < 0;
+  });
   const promises = keys.map(async k => {
     try {
       const resp = await fetch('/api/' + k);
@@ -1035,11 +1460,94 @@ async function loadAllLayers() {
     }
   });
 
+  await loadViewportAirspaceLayers();
   buildLayerToggles();
   applyMode();
   applyAltFilter();
   updateStats();
 }
+
+function clearLayerArtifacts(key) {
+  if (mapLayers[key]) {
+    map.removeLayer(mapLayers[key]);
+    delete mapLayers[key];
+  }
+  allFeatureIndex = allFeatureIndex.filter(function(entry) { return entry.key !== key; });
+}
+
+function normalizeAirspaceZoneFeature(zone) {
+  var props = Object.assign({}, ((zone.metadata || {}).properties || {}));
+  props.zone_id = props.zone_id || zone.zone_id || '';
+  props.name = props.name || zone.name || '';
+  props.category = props.category || zone.category || '';
+  props.source = props.source || zone.source || '';
+  if (props.lower_limit_m == null) props.lower_limit_m = zone.lower_altitude_m;
+  if (props.upper_limit_m == null) props.upper_limit_m = zone.upper_altitude_m;
+  if (props.valid_from == null) props.valid_from = zone.valid_from || null;
+  if (props.valid_to == null) props.valid_to = zone.valid_to || null;
+  return {
+    type: 'Feature',
+    properties: props,
+    geometry: zone.geometry || null
+  };
+}
+
+function buildDynamicAirspaceCollections(zones) {
+  var collections = {};
+  DYNAMIC_AIRSPACE_LAYER_KEYS.forEach(function(key) {
+    collections[key] = { type: 'FeatureCollection', features: [] };
+  });
+  (zones || []).forEach(function(zone) {
+    var layerKey = layerKeyFromAirspaceZone(zone);
+    if (!collections[layerKey]) return;
+    collections[layerKey].features.push(normalizeAirspaceZoneFeature(zone));
+  });
+  return collections;
+}
+
+async function loadViewportAirspaceLayers() {
+  var bounds = map.getBounds();
+  var bbox = [
+    bounds.getWest().toFixed(6),
+    bounds.getSouth().toFixed(6),
+    bounds.getEast().toFixed(6),
+    bounds.getNorth().toFixed(6)
+  ].join(',');
+  var requestId = ++airspaceViewportRequestId;
+  const res = await fetch(
+    '/airspace/zones?bbox=' + encodeURIComponent(bbox) +
+    '&categories=' + encodeURIComponent(AIRSPACE_CATEGORY_FILTERS.join(','))
+  );
+  const data = await res.json().catch(function() { return {}; });
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || 'Failed to load airspace zones.');
+  }
+  if (requestId !== airspaceViewportRequestId) return;
+
+  var collections = buildDynamicAirspaceCollections(data.zones || []);
+  DYNAMIC_AIRSPACE_LAYER_KEYS.forEach(function(key) {
+    clearLayerArtifacts(key);
+    rawData[key] = normalizeGeoJSON(collections[key]);
+    buildMapLayer(key, rawData[key]);
+  });
+}
+
+function scheduleViewportAirspaceRefresh() {
+  clearTimeout(airspaceViewportRefreshTimer);
+  airspaceViewportRefreshTimer = setTimeout(async function() {
+    try {
+      await loadViewportAirspaceLayers();
+      buildLayerToggles();
+      applyMode();
+      applyAltFilter();
+      updateStats();
+    } catch (err) {
+      console.error('Failed to refresh viewport airspace', err);
+    }
+  }, 200);
+}
+
+map.on('moveend', scheduleViewportAirspaceRefresh);
 
 function buildMapLayer(key, geojson) {
   const cfg = LAYERS_CFG[key];
@@ -1159,6 +1667,11 @@ function fmtAlt(m) {
 // ========================================================================
 function buildLayerToggles() {
   var container = document.getElementById('layerToggles');
+  var previousVisibility = {};
+  Object.keys(LAYERS_CFG).forEach(function(key) {
+    var existing = document.getElementById('cb_' + key);
+    if (existing) previousVisibility[key] = existing.checked;
+  });
   container.innerHTML = '';
   Object.keys(LAYERS_CFG).forEach(function(key) {
     var cfg = LAYERS_CFG[key];
@@ -1172,7 +1685,9 @@ function buildLayerToggles() {
     cb.type = 'checkbox';
     cb.className = 'layer-cb';
     cb.id = 'cb_' + key;
-    cb.checked = isLayerVisible(key);
+    cb.checked = Object.prototype.hasOwnProperty.call(previousVisibility, key)
+      ? previousVisibility[key]
+      : isLayerVisible(key);
     cb.addEventListener('change', (function(k) {
       return function() { toggleLayer(k); };
     })(key));
@@ -1198,6 +1713,8 @@ function buildLayerToggles() {
 }
 
 function isLayerVisible(key) {
+  var existing = document.getElementById('cb_' + key);
+  if (existing) return existing.checked;
   var cfg = LAYERS_CFG[key];
   return currentMode === 'drone' ? cfg.droneDefault : cfg.gaDefault;
 }
@@ -2425,11 +2942,20 @@ def _utc_now_iso() -> str:
 def _json_default(value):
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
     raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 def _json_bytes(payload, *, ensure_ascii: bool = False) -> bytes:
     return json.dumps(payload, ensure_ascii=ensure_ascii, default=_json_default).encode("utf-8")
+
+
+def _parse_bbox_query(raw: str) -> tuple[float, float, float, float]:
+    parts = [part.strip() for part in raw.split(",")]
+    if len(parts) != 4:
+        raise ValueError("bbox must contain minLon,minLat,maxLon,maxLat")
+    return tuple(float(part) for part in parts)  # type: ignore[return-value]
 
 
 def _decode_jwt_payload(token: str) -> dict:
@@ -2516,6 +3042,45 @@ def _list_flight_plans_response(
     )
 
 
+def _format_schedule_label(minutes: int | None) -> str:
+    if minutes is None:
+        return "manual"
+    if minutes % (24 * 60) == 0:
+        days = minutes // (24 * 60)
+        return f"every {days} day{'s' if days != 1 else ''}"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return f"every {hours} hour{'s' if hours != 1 else ''}"
+    return f"every {minutes} min"
+
+
+def _build_admin_overview_response() -> dict:
+    accounts = _list_logged_accounts()
+    flight_plans = _list_flight_plans_response(owner_email=None, include_past=True, include_cancelled=True)
+    active_versions = AIRSPACE_ADMIN_REPO.list_active_versions()
+    source_status = AIRSPACE_ADMIN_REPO.list_source_status()
+    recent_events = AIRSPACE_ADMIN_REPO.list_recent_raw_events(limit=20)
+    recent_issues = AIRSPACE_ADMIN_REPO.list_recent_issues(limit=20)
+
+    sources_by_name = {name: source for name, source in AIRSPACE_INGESTION_SOURCES.items()}
+    for source in source_status:
+        config = sources_by_name.get(source.get("source"))
+        source["schedule_minutes"] = config.schedule_minutes if config else None
+        source["schedule_label"] = _format_schedule_label(source.get("schedule_minutes"))
+        source["label"] = (source.get("source") or "").replace("_", " ").upper()
+
+    return {
+        "accounts": accounts,
+        "flight_plans": flight_plans,
+        "airspace": {
+            "sources": source_status,
+            "active_versions": active_versions,
+            "recent_events": recent_events,
+            "recent_issues": recent_issues,
+        },
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # HTTP handler
 # ──────────────────────────────────────────────────────────────────────────
@@ -2547,17 +3112,21 @@ class Handler(BaseHTTPRequestHandler):
                 page,
             )
 
-        elif path == "/admin/logged-accounts":
-            self._send(200, "text/html; charset=utf-8", ADMIN_HTML.encode("utf-8"))
-
-        elif path == "/admin/flight-plans":
-            self._send(200, "text/html; charset=utf-8", FLIGHT_PLAN_ADMIN_HTML.encode("utf-8"))
+        elif path in ("/admin", "/admin/logged-accounts", "/admin/flight-plans"):
+            self._send(200, "text/html; charset=utf-8", ADMIN_DASHBOARD_HTML.encode("utf-8"))
 
         elif path == "/api/auth/sessions":
             self._send(
                 200,
                 "application/json; charset=utf-8",
                 _json_bytes({"accounts": _list_logged_accounts()}),
+            )
+
+        elif path == "/api/admin/overview":
+            self._send(
+                200,
+                "application/json; charset=utf-8",
+                _json_bytes(_build_admin_overview_response()),
             )
 
         elif path == "/api/auth/me":
@@ -2570,6 +3139,39 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/healthz":
             self._send(200, "application/json; charset=utf-8", b'{"ok": true}')
+
+        elif path == "/airspace/zones":
+            try:
+                bbox = _parse_bbox_query(qs.get("bbox", [""])[0])
+                categories = _normalize_airspace_categories(qs.get("categories", [None])[0])
+                result = AIRSPACE_QUERY_SERVICE.get_zones_in_bbox(bbox, categories=categories)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(result, ensure_ascii=False),
+                )
+            except Exception as exc:
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+
+        elif path == "/airspace/zones/near":
+            try:
+                lat = float(qs.get("lat", [0])[0])
+                lon = float(qs.get("lon", [0])[0])
+                radius_km = float(qs.get("radius_km", [10])[0])
+                categories = _normalize_airspace_categories(qs.get("categories", [None])[0])
+                result = AIRSPACE_QUERY_SERVICE.get_zones_near(
+                    lat=lat,
+                    lon=lon,
+                    radius_km=radius_km,
+                    categories=categories,
+                )
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(result, ensure_ascii=False),
+                )
+            except Exception as exc:
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/airspace/check-point":
             try:
@@ -2871,6 +3473,7 @@ def main():
     found = [k for k, p in LAYER_FILES.items() if p.exists()]
     print(f"\n  ROMATSA Mirror  ->  {url}")
     print(f"  Layers found: {len(found)}/{len(LAYER_FILES)}: {', '.join(found)}")
+    print(f"  Admin dashboard: {url}/admin")
     print(f"  Logged accounts: {url}/admin/logged-accounts")
     print(f"  Flight plans: {url}/admin/flight-plans")
     print("  Press Ctrl-C to stop.\n")

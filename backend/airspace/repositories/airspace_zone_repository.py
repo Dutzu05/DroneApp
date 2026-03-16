@@ -8,6 +8,22 @@ from backend.airspace.repositories.db import get_connection
 
 
 class AirspaceZoneRepository:
+    def _category_clause(self, categories: set[str] | None) -> str:
+        if not categories:
+            return ''
+        clauses: list[str] = []
+        if 'ctr' in categories:
+            clauses.append("category = 'ctr'")
+        if 'tma' in categories:
+            clauses.append("category = 'tma'")
+        if 'notam' in categories:
+            clauses.append("(category = 'temporary_restriction' OR source LIKE 'notam%%')")
+        if 'restricted' in categories:
+            clauses.append("(category = 'restricted' AND source NOT LIKE 'notam%%')")
+        if not clauses:
+            return ''
+        return ' AND (' + ' OR '.join(clauses) + ')'
+
     def replace_version(self, *, source: str, version_id: str, zones: list[AirspaceZone], conn=None) -> None:
         if conn is None:
             with get_connection() as managed_conn:
@@ -71,28 +87,31 @@ class AirspaceZoneRepository:
                 ),
             )
 
-    def zones_in_bbox(self, bbox: tuple[float, float, float, float]) -> list[dict[str, Any]]:
+    def zones_in_bbox(self, bbox: tuple[float, float, float, float], *, categories: set[str] | None = None) -> list[dict[str, Any]]:
         min_lon, min_lat, max_lon, max_lat = bbox
+        category_clause = self._category_clause(categories)
         with get_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT zone_id, source, name, category, lower_altitude_m, upper_altitude_m,
                        valid_from, valid_to, metadata,
                        ST_AsGeoJSON(geometry)::jsonb AS geometry
                 FROM airspace_zones_active
                 WHERE geometry && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
                   AND ST_Intersects(geometry, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+                  {category_clause}
                 ORDER BY source, name
                 """,
                 (min_lon, min_lat, max_lon, max_lat, min_lon, min_lat, max_lon, max_lat),
             )
             return list(cur.fetchall())
 
-    def zones_near_point(self, *, lat: float, lon: float, radius_km: float) -> list[dict[str, Any]]:
+    def zones_near_point(self, *, lat: float, lon: float, radius_km: float, categories: set[str] | None = None) -> list[dict[str, Any]]:
         radius_m = radius_km * 1000.0
+        category_clause = self._category_clause(categories)
         with get_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT zone_id, source, name, category, lower_altitude_m, upper_altitude_m,
                        valid_from, valid_to, metadata,
                        ST_AsGeoJSON(geometry)::jsonb AS geometry,
@@ -106,6 +125,7 @@ class AirspaceZoneRepository:
                     geography(ST_SetSRID(ST_MakePoint(%s, %s), 4326)),
                     %s
                 )
+                {category_clause}
                 ORDER BY distance_m ASC, source, name
                 """,
                 (lon, lat, lon, lat, radius_m),
