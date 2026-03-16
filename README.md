@@ -128,6 +128,10 @@ Start server:
 ## Testing
 - Unit test runner:
   - `./scripts/run-unit-tests.sh`
+- PostGIS ingestion smoke:
+  - `./scripts/run-airspace-compose-smoke.sh`
+- HTTP airspace smoke for staging/production:
+  - `AIRSPACE_SMOKE_BASE_URL=https://staging.example.com ./scripts/run-airspace-http-smoke.sh`
 - Pre-commit hook setup:
   - `./scripts/setup-git-hooks.sh`
 - Pre-commit hook path:
@@ -144,16 +148,20 @@ Start server:
   - `e2e/flight-plans.spec.ts`
 - Local Docker E2E:
   - `./scripts/run-e2e-compose.sh`
+  - includes real airspace ingestion smoke against PostGIS before Playwright
 - Staging E2E:
   - `E2E_BASE_URL=https://staging.example.com ./scripts/run-e2e-staging.sh`
+  - includes HTTP airspace smoke before Playwright
 
 ## GitHub Actions
 - CI/CD pipeline:
   - `.github/workflows/ci-cd.yml`
+  - runs syntax, unit coverage, compose integration smoke, then image build
 - Manual Docker E2E workflow:
   - `.github/workflows/e2e-compose.yml`
 - Daily staging E2E workflow:
   - `.github/workflows/e2e-staging.yml`
+  - runs both airspace smoke and Playwright against staging
 - Runner requirement:
   - all workflows target `self-hosted, build-01`
 

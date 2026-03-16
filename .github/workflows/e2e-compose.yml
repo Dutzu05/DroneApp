@@ -15,6 +15,11 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Run Docker Compose E2E
         shell: bash
         env:

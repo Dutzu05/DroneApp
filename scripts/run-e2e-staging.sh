@@ -9,6 +9,7 @@ if [ -z "${E2E_BASE_URL:-}" ]; then
   exit 1
 fi
 
+AIRSPACE_SMOKE_BASE_URL="$E2E_BASE_URL" ./scripts/run-airspace-http-smoke.sh
 npm ci
-npx playwright install --with-deps chromium
+npx playwright install chromium
 npx playwright test --grep @staging

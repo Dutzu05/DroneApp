@@ -37,8 +37,31 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
 
-  build-image:
+  integration-compose:
     needs: quality
+    runs-on: [self-hosted, build-01]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run compose integration suite
+        shell: bash
+        env:
+          COMPOSE_PROJECT_SUFFIX: ${{ github.run_id }}
+        run: ./scripts/run-e2e-compose.sh
+
+  build-image:
+    needs: integration-compose
     runs-on: [self-hosted, build-01]
     steps:
       - uses: actions/checkout@v4

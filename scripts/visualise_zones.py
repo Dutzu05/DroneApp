@@ -52,6 +52,7 @@ if str(ROOT_DIR) not in sys.path:
 from modules.auth.module import build_auth_module
 from backend.airspace.ingestion.pipeline import SOURCES as AIRSPACE_INGESTION_SOURCES
 from backend.airspace.repositories.admin_repository import AirspaceAdminRepository
+from backend.airspace.services.admin_overview_service import AirspaceAdminOverviewService
 from backend.airspace.services.airspace_query_service import (
     build_airspace_query_service,
     normalize_categories as _normalize_airspace_categories,
@@ -118,6 +119,10 @@ GOOGLE_WEB_CLIENT_ID = os.environ.get(
 )
 AIRSPACE_QUERY_SERVICE = build_airspace_query_service()
 AIRSPACE_ADMIN_REPO = AirspaceAdminRepository()
+AIRSPACE_ADMIN_OVERVIEW_SERVICE = AirspaceAdminOverviewService(
+    admin_repo=AIRSPACE_ADMIN_REPO,
+    sources=AIRSPACE_INGESTION_SOURCES,
+)
 
 LAYER_FILES = {
     "uas_zones":    ASSET_DIR / "restriction_zones.geojson",
@@ -3042,42 +3047,13 @@ def _list_flight_plans_response(
     )
 
 
-def _format_schedule_label(minutes: int | None) -> str:
-    if minutes is None:
-        return "manual"
-    if minutes % (24 * 60) == 0:
-        days = minutes // (24 * 60)
-        return f"every {days} day{'s' if days != 1 else ''}"
-    if minutes % 60 == 0:
-        hours = minutes // 60
-        return f"every {hours} hour{'s' if hours != 1 else ''}"
-    return f"every {minutes} min"
-
-
 def _build_admin_overview_response() -> dict:
     accounts = _list_logged_accounts()
     flight_plans = _list_flight_plans_response(owner_email=None, include_past=True, include_cancelled=True)
-    active_versions = AIRSPACE_ADMIN_REPO.list_active_versions()
-    source_status = AIRSPACE_ADMIN_REPO.list_source_status()
-    recent_events = AIRSPACE_ADMIN_REPO.list_recent_raw_events(limit=20)
-    recent_issues = AIRSPACE_ADMIN_REPO.list_recent_issues(limit=20)
-
-    sources_by_name = {name: source for name, source in AIRSPACE_INGESTION_SOURCES.items()}
-    for source in source_status:
-        config = sources_by_name.get(source.get("source"))
-        source["schedule_minutes"] = config.schedule_minutes if config else None
-        source["schedule_label"] = _format_schedule_label(source.get("schedule_minutes"))
-        source["label"] = (source.get("source") or "").replace("_", " ").upper()
-
     return {
         "accounts": accounts,
         "flight_plans": flight_plans,
-        "airspace": {
-            "sources": source_status,
-            "active_versions": active_versions,
-            "recent_events": recent_events,
-            "recent_issues": recent_issues,
-        },
+        "airspace": AIRSPACE_ADMIN_OVERVIEW_SERVICE.overview(),
     }
 
 
