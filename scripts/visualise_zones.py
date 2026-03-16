@@ -51,6 +51,7 @@ from backend_auth import (
 )
 from flight_plan_repository import (
     FlightPlanRepositoryError,
+    cancel_flight_plan as _cancel_flight_plan_db,
     create_flight_plan as _store_flight_plan,
     get_flight_plan as _get_flight_plan,
     list_flight_plans as _list_flight_plans_db,
@@ -458,6 +459,24 @@ HTML = b"""<!DOCTYPE html>
   }
   .my-plan-card .plan-id { font-weight: 700; color: #f0f6fc; }
   .my-plan-card .plan-meta { color: var(--muted); line-height: 1.45; }
+  .plan-actions {
+    margin-top: 8px; display: flex; gap: 8px; align-items: center; justify-content: space-between;
+  }
+  .plan-link {
+    color: var(--blue); text-decoration: none; font-weight: 600;
+  }
+  .plan-link:hover { text-decoration: underline; }
+  .mini-btn {
+    padding: 5px 9px; border-radius: 999px; border: 1px solid var(--border);
+    background: transparent; color: var(--text); font-size: 0.7rem; cursor: pointer;
+  }
+  .mini-btn:hover { border-color: var(--accent); }
+  .mini-btn-danger {
+    border-color: rgba(233,69,96,.5); color: #ffb4ab;
+  }
+  .mini-btn-danger:hover {
+    border-color: #e94560; background: rgba(233,69,96,.12);
+  }
   .status-pill {
     display: inline-block; padding: 2px 8px; border-radius: 999px;
     font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
@@ -526,7 +545,8 @@ HTML = b"""<!DOCTYPE html>
   .btn-primary   { background: var(--accent); color: #fff; }
   .btn-secondary { background: var(--bg); border: 1px solid var(--border) !important; color: var(--text); }
   .btn-success   { background: var(--green); color: #000; }
-  .btn-primary:hover, .btn-secondary:hover, .btn-success:hover { opacity:.85; }
+  .btn-danger    { background: #da3633; color: #fff; }
+  .btn-primary:hover, .btn-secondary:hover, .btn-success:hover, .btn-danger:hover { opacity:.85; }
   .risk-badge {
     display:inline-block; padding:3px 10px; border-radius:12px;
     font-size:.75rem; font-weight:700; color:#fff; margin-bottom:8px;
@@ -554,6 +574,9 @@ HTML = b"""<!DOCTYPE html>
     background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.4);
     color: #ffd48a; border-radius: 8px; padding: 10px 12px;
     font-size: .78rem; line-height: 1.45; margin-bottom: 10px;
+  }
+  .area-note {
+    color: var(--muted); font-size: .74rem; line-height: 1.45; margin-top: 6px;
   }
   .saved-plan-card {
     border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
@@ -672,9 +695,16 @@ let rawData   = {};
 let allFeatureIndex = [];
 let layersLoaded = false;
 let authenticatedUser = null;
+const CENTER_BLOCKING_LAYER_KEYS = ['ctr', 'uas_zones', 'notam', 'tma'];
 
 function setMyPlansContent(html) {
   document.getElementById('myPlansList').innerHTML = html;
+}
+
+function canCancelPlan(plan) {
+  const runtimeState = (plan.runtime_state || '').toLowerCase();
+  const workflowStatus = (plan.workflow_status || '').toLowerCase();
+  return workflowStatus !== 'cancelled' && runtimeState !== 'completed';
 }
 
 function renderMyFlightPlans(plans) {
@@ -690,6 +720,9 @@ function renderMyFlightPlans(plans) {
   const html = plans.slice(0, 6).map(function(plan) {
     const runtimeState = (plan.runtime_state || 'upcoming').toLowerCase();
     const riskState = (plan.risk_level || 'LOW').toLowerCase();
+    const cancelButton = canCancelPlan(plan)
+      ? `<button class="mini-btn mini-btn-danger" type="button" onclick="cancelFlightPlan('${plan.public_id || ''}')">Cancel</button>`
+      : '';
     return (
       '<div class="my-plan-card">' +
         '<div class="plan-top">' +
@@ -701,9 +734,12 @@ function renderMyFlightPlans(plans) {
           (plan.scheduled_start_local || '') + ' -> ' + (plan.scheduled_end_local || '') + '<br/>' +
           (plan.selected_twr || '') + ' / ' + Math.round(plan.max_altitude_m || 0) + ' m' +
         '</div>' +
-        '<div style="margin-top:8px;display:flex;justify-content:space-between;gap:8px;align-items:center">' +
+        '<div class="plan-actions">' +
           '<span class="risk-pill risk-' + riskState + '">' + (plan.risk_level || 'LOW') + '</span>' +
-          '<a href="' + (plan.download_url || '#') + '" target="_blank">PDF</a>' +
+          '<div style="display:flex;gap:8px;align-items:center">' +
+            '<a class="plan-link" href="' + (plan.download_url || '#') + '" target="_blank">PDF</a>' +
+            cancelButton +
+          '</div>' +
         '</div>' +
       '</div>'
     );
@@ -730,6 +766,30 @@ async function loadMyFlightPlans(showErrors) {
     } else {
       console.error(err);
     }
+  }
+}
+
+async function cancelFlightPlan(publicId) {
+  if (!publicId) return;
+  if (!confirm('Cancel flight plan ' + publicId + '?')) {
+    return;
+  }
+  try {
+    const res = await fetch('/api/flight-plans/' + encodeURIComponent(publicId) + '/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to cancel the flight plan.');
+    }
+    loadMyFlightPlans(false);
+    if (fpSavedPlan && fpSavedPlan.public_id === publicId) {
+      fpSavedPlan = data.flight_plan || fpSavedPlan;
+      showSavedFlightPlan();
+    }
+  } catch (err) {
+    alert(err && err.message ? err.message : 'Failed to cancel the flight plan.');
   }
 }
 
@@ -1440,6 +1500,101 @@ function setAreaKind(kind) {
   }
 }
 
+function pointInRingJs(lon, lat, ring) {
+  var inside = false;
+  var j = ring.length - 1;
+  for (var i = 0; i < ring.length; i += 1) {
+    var xi = ring[i][0];
+    var yi = ring[i][1];
+    var xj = ring[j][0];
+    var yj = ring[j][1];
+    if (((yi > lat) !== (yj > lat)) && (lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+    j = i;
+  }
+  return inside;
+}
+
+function featureContainsPointJs(feature, lon, lat, altM) {
+  if (!feature || !feature.geometry) return false;
+  var props = feature.properties || {};
+  var lo = props.lower_limit_m;
+  var up = props.upper_limit_m;
+  if (lo != null && up != null && (altM < lo || altM > up)) {
+    return false;
+  }
+  var geom = feature.geometry;
+  var coords = geom.coordinates || [];
+  if (geom.type === 'Polygon') {
+    return coords.some(function(ring) { return pointInRingJs(lon, lat, ring); });
+  }
+  if (geom.type === 'MultiPolygon') {
+    return coords.some(function(poly) {
+      return poly.some(function(ring) { return pointInRingJs(lon, lat, ring); });
+    });
+  }
+  return false;
+}
+
+function formatBlockingHit(feature, layerKey) {
+  var props = feature.properties || {};
+  return {
+    layerKey: layerKey,
+    label: (LAYERS_CFG[layerKey] && LAYERS_CFG[layerKey].label) || layerKey,
+    name: props.zone_id || props.zone_code || props.notam_id || props.name || props.arsp_name || layerKey,
+  };
+}
+
+function findBlockingCircleCenterHits(lon, lat, altM) {
+  var hits = [];
+  CENTER_BLOCKING_LAYER_KEYS.forEach(function(layerKey) {
+    var data = rawData[layerKey];
+    if (!data || !data.features) return;
+    data.features.forEach(function(feature) {
+      if (featureContainsPointJs(feature, lon, lat, altM)) {
+        hits.push(formatBlockingHit(feature, layerKey));
+      }
+    });
+  });
+  return hits;
+}
+
+function summarizeBlockingHits(hits) {
+  return hits.slice(0, 4).map(function(hit) {
+    return hit.label + ': ' + hit.name;
+  }).join(', ') + (hits.length > 4 ? ', ...' : '');
+}
+
+function rejectCircleCenter(hits, interactive) {
+  if (fpCircle) {
+    map.removeLayer(fpCircle);
+    fpCircle = null;
+  }
+  fpCentre = null;
+  var message = 'Circle centre is not allowed inside CTR/UAS/NOTAM/TMA areas: ' + summarizeBlockingHits(hits);
+  document.getElementById('fpCircleInfo').textContent = message;
+  if (interactive) {
+    alert(message);
+  }
+  return false;
+}
+
+function setCircleCenter(lat, lon, interactive, syncInputs) {
+  var altM = parseFloat(document.getElementById('fpAlt').value) || 120;
+  var hits = findBlockingCircleCenterHits(lon, lat, altM);
+  if (hits.length) {
+    return rejectCircleCenter(hits, interactive);
+  }
+  fpCentre = { lat: lat, lon: lon };
+  if (syncInputs) {
+    document.getElementById('fpLat').value = lat.toFixed(6);
+    document.getElementById('fpLon').value = lon.toFixed(6);
+  }
+  updateFpCircle();
+  return true;
+}
+
 function clearFpCircle() {
   if (fpCircle) {
     map.removeLayer(fpCircle);
@@ -1458,6 +1613,29 @@ function clearFpPolygon() {
   fpPolygonMarkers.forEach(function(marker) { map.removeLayer(marker); });
   fpPolygonMarkers = [];
   renderPolygonSummary();
+}
+
+function addPolygonVertex(lon, lat) {
+  if (fpPolygonPoints.length >= 5) {
+    throw new Error('ANEXA 1 allows a maximum of 5 polygon vertices.');
+  }
+  fpPolygonPoints.push([lon, lat]);
+  updateFpPolygon();
+}
+
+function addPolygonPointFromInputs() {
+  try {
+    var lat = parseFloat(document.getElementById('fpPolyLat').value);
+    var lon = parseFloat(document.getElementById('fpPolyLon').value);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      throw new Error('Enter both polygon latitude and longitude.');
+    }
+    addPolygonVertex(lon, lat);
+    document.getElementById('fpPolyLat').value = '';
+    document.getElementById('fpPolyLon').value = '';
+  } catch (err) {
+    alert(err && err.message ? err.message : 'Failed to add polygon point.');
+  }
 }
 
 function clearFlightArea() {
@@ -1486,8 +1664,7 @@ function syncCircleFromInputs() {
   var lat = parseFloat(document.getElementById('fpLat').value);
   var lon = parseFloat(document.getElementById('fpLon').value);
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    fpCentre = { lat: lat, lon: lon };
-    updateFpCircle();
+    setCircleCenter(lat, lon, false, false);
   }
 }
 
@@ -1572,10 +1749,9 @@ function undoPolygonPoint() {
 function onMapClickFP(e) {
   if (!fpAreaPickMode) return;
   if (fpAreaPickMode === 'circle') {
-    fpCentre = { lat: e.latlng.lat, lon: e.latlng.lng };
-    document.getElementById('fpLat').value = fpCentre.lat.toFixed(6);
-    document.getElementById('fpLon').value = fpCentre.lon.toFixed(6);
-    updateFpCircle();
+    if (!setCircleCenter(e.latlng.lat, e.latlng.lng, true, true)) {
+      return;
+    }
     fpAreaPickMode = null;
     document.getElementById('fpDrawHint').style.display = 'none';
     document.getElementById('fpOverlay').style.pointerEvents = 'all';
@@ -1589,8 +1765,7 @@ function onMapClickFP(e) {
       document.getElementById('fpOverlay').style.pointerEvents = 'all';
       return;
     }
-    fpPolygonPoints.push([e.latlng.lng, e.latlng.lat]);
-    updateFpPolygon();
+    addPolygonVertex(e.latlng.lng, e.latlng.lat);
     if (fpPolygonPoints.length >= 5) {
       fpAreaPickMode = null;
       document.getElementById('fpDrawHint').style.display = 'none';
@@ -1869,8 +2044,12 @@ window.addEventListener('load', async function() {
           <label>Area shape from ANEXA 1</label>
           <select id="fpAreaKind" onchange="setAreaKind(this.value)">
             <option value="circle" selected>Circle</option>
-            <option value="polygon">Polygon (max 5 points)</option>
+            <option value="polygon">Polygon (ANEXA 1, max 5 points)</option>
           </select>
+          <div class="area-note">
+            Use <strong>Circle</strong> for center + radius notifications, or switch to
+            <strong>Polygon</strong> to enter the ANEXA 1 vertices directly.
+          </div>
         </div>
         <div class="draw-hint" id="fpDrawHint" style="display:none">
           <span class="hint-icon">&#128205;</span>
@@ -1891,12 +2070,25 @@ window.addEventListener('load', async function() {
             <label>Radius (metres)</label>
             <input id="fpRadius" type="number" min="50" max="5000" value="200"/>
           </div>
+          <div class="area-note">
+            The circle centre cannot be placed inside CTR, UAS, NOTAM, or TMA polygons.
+          </div>
           <div class="inline-btn-row">
             <button class="inline-btn" type="button" onclick="startAreaSelection()">Pick center on map</button>
             <button class="inline-btn" type="button" onclick="clearFlightArea()">Clear circle</button>
           </div>
         </div>
         <div id="fpPolygonFields" style="display:none">
+          <div class="fp-2col">
+            <div class="fp-row">
+              <label>Vertex latitude</label>
+              <input id="fpPolyLat" type="number" step="0.000001" placeholder="44.426800"/>
+            </div>
+            <div class="fp-row">
+              <label>Vertex longitude</label>
+              <input id="fpPolyLon" type="number" step="0.000001" placeholder="26.102500"/>
+            </div>
+          </div>
           <div class="fp-row">
             <label>Polygon vertices</label>
             <div id="fpPolygonSummary" class="my-plan-card">
@@ -1904,11 +2096,15 @@ window.addEventListener('load', async function() {
             </div>
           </div>
           <div class="inline-btn-row">
+            <button class="inline-btn" type="button" onclick="addPolygonPointFromInputs()">Add typed vertex</button>
             <button class="inline-btn" type="button" onclick="startAreaSelection()">Add points on map</button>
-            <button class="inline-btn" type="button" onclick="undoPolygonPoint()">Undo last point</button>
           </div>
           <div class="inline-btn-row">
+            <button class="inline-btn" type="button" onclick="undoPolygonPoint()">Undo last point</button>
             <button class="inline-btn" type="button" onclick="clearFlightArea()">Clear polygon</button>
+          </div>
+          <div class="area-note">
+            Add between 3 and 5 vertices, in the same order you would complete ANEXA 1.
           </div>
         </div>
         <div class="fp-row">
@@ -2259,6 +2455,18 @@ def _create_flight_plan_from_payload(payload: dict, owner: dict) -> dict:
     return stored
 
 
+def _cancel_owned_flight_plan(public_id: str, owner: dict) -> dict:
+    try:
+        cancelled = _cancel_flight_plan_db(public_id, owner_email=owner["email"])
+    except FlightPlanRepositoryError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not cancelled:
+        raise ValueError("Flight plan cannot be cancelled")
+    cancelled["download_url"] = f"/api/flight-plans/{cancelled['public_id']}/pdf"
+    cancelled["can_cancel"] = False
+    return cancelled
+
+
 def _list_flight_plans_response(
     *,
     owner_email: str | None = None,
@@ -2277,6 +2485,9 @@ def _list_flight_plans_response(
     for plan in plans:
         if plan.get("public_id"):
             plan["download_url"] = f"/api/flight-plans/{plan['public_id']}/pdf"
+        runtime_state = (plan.get("runtime_state") or "").lower()
+        workflow_status = (plan.get("workflow_status") or "").lower()
+        plan["can_cancel"] = workflow_status != "cancelled" and runtime_state != "completed"
     return plans
 
 
@@ -2300,7 +2511,10 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = parse_qs(parsed.query)
 
-        if path == "/" or path == "/index.html":
+        if path == "/favicon.ico":
+            self._send(204, "image/x-icon", b"")
+
+        elif path == "/" or path == "/index.html":
             page = HTML.replace(b"__GOOGLE_CLIENT_ID__", GOOGLE_WEB_CLIENT_ID.encode("utf-8"))
             page = page.replace(
                 b"__TOWER_CONTACTS_JSON__",
@@ -2510,6 +2724,23 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:
                 self._send(400, "application/json", json.dumps({"error": str(exc)}).encode())
+
+        elif path.startswith("/api/flight-plans/") and path.endswith("/cancel"):
+            public_id = path[len("/api/flight-plans/"):-len("/cancel")].strip("/")
+            try:
+                owner = _require_session_user(self.headers)
+                cancelled = _cancel_owned_flight_plan(public_id, owner)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    json.dumps({"ok": True, "flight_plan": cancelled}, ensure_ascii=False).encode(),
+                )
+            except PermissionError as exc:
+                self._send(401, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+            except ValueError as exc:
+                self._send(400, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+            except Exception as exc:
+                self._send(500, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
 
         elif path == "/api/flight-plans":
             try:

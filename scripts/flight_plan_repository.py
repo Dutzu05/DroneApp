@@ -364,3 +364,46 @@ def get_flight_plan(
     """
     result = _run_json_query(sql)
     return result if isinstance(result, dict) else None
+
+
+def cancel_flight_plan(
+    public_id: str,
+    *,
+    owner_email: str,
+) -> dict[str, Any] | None:
+    sql = f"""
+    WITH updated AS (
+      UPDATE flight_plans fp
+      SET
+        workflow_status = 'cancelled',
+        cancelled_at = NOW(),
+        updated_at = NOW()
+      WHERE fp.public_id = {_sql_literal(public_id)}
+        AND fp.owner_email = {_sql_literal(owner_email.strip().lower())}
+        AND fp.workflow_status <> 'cancelled'
+        AND fp.scheduled_end_at >= NOW()
+      RETURNING
+        fp.public_id,
+        fp.owner_email,
+        fp.owner_display_name,
+        fp.operator_name,
+        fp.location_name,
+        fp.area_kind,
+        fp.selected_twr,
+        fp.max_altitude_m,
+        fp.risk_level,
+        fp.risk_summary,
+        fp.workflow_status,
+        {_runtime_state_sql("fp")} AS runtime_state,
+        fp.scheduled_start_at,
+        fp.scheduled_end_at,
+        TO_CHAR(fp.scheduled_start_at AT TIME ZONE fp.local_timezone, 'DD.MM.YYYY HH24:MI') AS scheduled_start_local,
+        TO_CHAR(fp.scheduled_end_at AT TIME ZONE fp.local_timezone, 'DD.MM.YYYY HH24:MI') AS scheduled_end_local,
+        fp.local_timezone,
+        fp.pdf_rel_path,
+        fp.updated_at
+    )
+    SELECT row_to_json(updated) FROM updated;
+    """
+    result = _run_json_query(sql)
+    return result if isinstance(result, dict) else None

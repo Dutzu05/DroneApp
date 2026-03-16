@@ -549,6 +549,52 @@ def build_polygon_area(points: list[list[float]]) -> dict[str, Any]:
     }
 
 
+def point_matches_feature(
+    lon: float,
+    lat: float,
+    feat: dict[str, Any],
+    alt_m: float,
+) -> bool:
+    geom = feat.get("geometry") or {}
+    props = feat.get("properties") or {}
+    lo = props.get("lower_limit_m")
+    up = props.get("upper_limit_m")
+
+    if lo is not None and up is not None:
+        if alt_m < lo or alt_m > up:
+            return False
+
+    gtype = geom.get("type", "")
+    coords = geom.get("coordinates", [])
+    if gtype == "Polygon":
+        return any(point_in_polygon(lon, lat, ring) for ring in coords)
+    if gtype == "MultiPolygon":
+        return any(point_in_polygon(lon, lat, ring) for poly in coords for ring in poly)
+    return False
+
+
+def find_blocking_center_hits(lon: float, lat: float, alt_m: float) -> list[dict[str, Any]]:
+    hits: list[dict[str, Any]] = []
+    for layer_key in ("ctr", "uas_zones", "notam", "tma"):
+        layer_data = _load(layer_key)
+        for feat in layer_data.get("features", []):
+            if point_matches_feature(lon, lat, feat, alt_m):
+                props = feat.get("properties", {})
+                hits.append(
+                    {
+                        "layer_key": layer_key,
+                        "label": layer_key.replace("_", " ").upper(),
+                        "name": props.get("zone_id")
+                        or props.get("zone_code")
+                        or props.get("notam_id")
+                        or props.get("name")
+                        or props.get("arsp_name")
+                        or layer_key,
+                    }
+                )
+    return hits
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Layer access
 # ──────────────────────────────────────────────────────────────────────────
@@ -830,6 +876,15 @@ def validate_and_build_flight_plan(
     start_local, end_local, pdf_start_date, pdf_end_date = _parse_schedule(payload, now=now)
 
     assessment = assess_flight_area(area, max_altitude_m)
+    if area["kind"] == "circle":
+        center_hits = find_blocking_center_hits(area["center_lon"], area["center_lat"], max_altitude_m)
+        if center_hits:
+            labels = ", ".join(f"{hit['label']}: {hit['name']}" for hit in center_hits[:4])
+            if len(center_hits) > 4:
+                labels += ", ..."
+            raise FlightPlanValidationError(
+                f"Circle centre cannot be placed inside restricted airspace ({labels})"
+            )
 
     return {
         "public_id": _build_public_id(now),
