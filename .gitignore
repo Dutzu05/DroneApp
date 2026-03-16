@@ -15,6 +15,13 @@ build/
 .flutter-plugins
 .flutter-plugins-dependencies
 .packages
+node_modules/
+playwright-report/
+test-results/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 android/local.properties
 ios/Flutter/App.framework
 ios/Flutter/Flutter.framework

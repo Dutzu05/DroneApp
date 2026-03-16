@@ -1,0 +1,32 @@
+name: E2E Compose
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: [self-hosted, build-01]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Run Docker Compose E2E
+        shell: bash
+        env:
+          COMPOSE_PROJECT_SUFFIX: ${{ github.run_id }}
+        run: ./scripts/run-e2e-compose.sh
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-compose
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore

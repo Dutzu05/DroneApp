@@ -1,0 +1,63 @@
+name: E2E Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Staging base URL'
+        required: false
+        type: string
+
+jobs:
+  e2e:
+    runs-on: [self-hosted, build-01]
+    env:
+      SKIP_E2E: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Resolve base URL
+        shell: bash
+        env:
+          INPUT_BASE_URL: ${{ github.event.inputs.base_url || '' }}
+          SECRET_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+        run: |
+          set -euo pipefail
+          base="$INPUT_BASE_URL"
+          if [ -z "$base" ]; then
+            base="$SECRET_BASE_URL"
+          fi
+          base="$(echo "$base" | xargs)"
+          if [ -n "$base" ] && [[ "$base" != http://* && "$base" != https://* ]]; then
+            base="https://$base"
+          fi
+          base="${base%/}"
+          if [ -z "$base" ] || [[ "$base" == *"example.com"* ]]; then
+            echo "Skipping E2E because STAGING_BASE_URL is not configured with a real staging URL."
+            echo "SKIP_E2E=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "E2E_BASE_URL=$base" >> "$GITHUB_ENV"
+          echo "SKIP_E2E=false" >> "$GITHUB_ENV"
+
+      - name: Run staging E2E tests
+        if: env.SKIP_E2E != 'true'
+        run: ./scripts/run-e2e-staging.sh
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-staging
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore

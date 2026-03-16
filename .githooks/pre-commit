@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "[pre-commit] Running tests + coverage gate..."
+./scripts/run-unit-tests.sh
+
+echo "[pre-commit] OK"

@@ -101,3 +101,41 @@ Start server:
 - The backend can now run either:
   - on a Droplet with `docker compose`
   - or in App Platform with an external PostgreSQL database
+
+## Testing
+- Unit test runner:
+  - `./scripts/run-unit-tests.sh`
+- Pre-commit hook setup:
+  - `./scripts/setup-git-hooks.sh`
+- Pre-commit hook path:
+  - `.githooks/pre-commit`
+- Coverage gate:
+  - `80%` minimum on the extracted backend modules
+- Current unit suite runtime:
+  - well under `5 minutes`
+
+### E2E
+- Playwright config:
+  - `playwright.config.ts`
+- E2E specs:
+  - `e2e/flight-plans.spec.ts`
+- Local Docker E2E:
+  - `./scripts/run-e2e-compose.sh`
+- Staging E2E:
+  - `E2E_BASE_URL=https://staging.example.com ./scripts/run-e2e-staging.sh`
+
+## GitHub Actions
+- CI/CD pipeline:
+  - `.github/workflows/ci-cd.yml`
+- Manual Docker E2E workflow:
+  - `.github/workflows/e2e-compose.yml`
+- Daily staging E2E workflow:
+  - `.github/workflows/e2e-staging.yml`
+- Runner requirement:
+  - all workflows target `self-hosted, build-01`
+
+## Environment Separation
+- Example staging env:
+  - `env/.env.staging.example`
+- Example production env:
+  - `env/.env.production.example`

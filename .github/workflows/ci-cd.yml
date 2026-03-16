@@ -1,0 +1,81 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  quality:
+    runs-on: [self-hosted, build-01]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile scripts/visualise_zones.py scripts/flight_plan_manager.py scripts/flight_plan_repository.py scripts/backend_auth.py $(find modules -name '*.py')
+
+      - name: Unit tests with coverage gate
+        run: ./scripts/run-unit-tests.sh
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+
+  build-image:
+    needs: quality
+    runs-on: [self-hosted, build-01]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select container CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v docker >/dev/null 2>&1; then
+            echo "CONTAINER_CLI=docker" >> "$GITHUB_ENV"
+          elif command -v podman >/dev/null 2>&1; then
+            echo "CONTAINER_CLI=podman" >> "$GITHUB_ENV"
+          else
+            echo "Neither docker nor podman is available on this runner." >&2
+            exit 1
+          fi
+
+      - name: Build application image
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$CONTAINER_CLI" build -t drone-app:ci .
+
+  deploy-staging:
+    needs: build-image
+    if: github.ref == 'refs/heads/develop'
+    runs-on: [self-hosted, build-01]
+    environment: staging
+    steps:
+      - name: Staging deploy placeholder
+        run: echo "Add DigitalOcean staging deployment steps here."
+
+  deploy-production:
+    needs: build-image
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, build-01]
+    environment: production
+    steps:
+      - name: Production deploy placeholder
+        run: echo "Add DigitalOcean production deployment steps here."
