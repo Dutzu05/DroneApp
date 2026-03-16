@@ -37,12 +37,19 @@ import json
 import os
 import threading
 import time
+import sys
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from modules.auth.module import build_auth_module
+from modules.flight_plans.module import build_flight_plans_module
 from backend_auth import (
     clear_session_cookie_header,
     create_session_token,
@@ -106,9 +113,6 @@ LAYER_FILES = {
     "airports":     ASSET_DIR / "airports.geojson",
     "lower_routes": ASSET_DIR / "lower_routes.geojson",
 }
-
-_account_lock = threading.Lock()
-_logged_accounts: dict[str, dict] = {}
 
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -2318,106 +2322,38 @@ def _decode_jwt_payload(token: str) -> dict:
     return data
 
 
-def _load_logged_accounts() -> dict[str, dict]:
-    if not LOGGED_ACCOUNTS_FILE.exists():
-        return {}
-
-    try:
-        data = json.loads(LOGGED_ACCOUNTS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-    if isinstance(data, list):
-        accounts = data
-    else:
-        accounts = data.get("accounts", [])
-
-    loaded: dict[str, dict] = {}
-    for row in accounts:
-        if not isinstance(row, dict):
-            continue
-        email = (row.get("email") or "").strip().lower()
-        if not email:
-            continue
-        loaded[email] = row
-    return loaded
-
-
-def _persist_logged_accounts(rows: dict[str, dict]):
-    LOGGED_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "accounts": sorted(
-            rows.values(),
-            key=lambda row: row.get("last_seen", ""),
-            reverse=True,
-        )
-    }
-    tmp_path = LOGGED_ACCOUNTS_FILE.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    tmp_path.replace(LOGGED_ACCOUNTS_FILE)
-
-
-def _store_logged_account(payload: dict, source_ip: str):
-    id_token = (payload.get("id_token") or "").strip()
-    token_claims = _decode_jwt_payload(id_token) if id_token else {}
-
-    email = (token_claims.get("email") or payload.get("email") or "").strip().lower()
-    if not email:
-        raise ValueError("email is required")
-
-    display_name = (
-        token_claims.get("name")
-        or payload.get("display_name")
-        or ""
-    ).strip()
-    google_user_id = (
-        token_claims.get("sub")
-        or payload.get("google_user_id")
-        or ""
-    ).strip()
-
-    now = _utc_now_iso()
-    with _account_lock:
-        existing = _logged_accounts.get(email)
-        if existing is None:
-            _logged_accounts[email] = {
-                "email": email,
-                "display_name": display_name,
-                "google_user_id": google_user_id,
-                "first_seen": now,
-                "last_seen": now,
-                "last_ip": source_ip,
-                "last_app": payload.get("app") or "drone_frontend",
-            }
-        else:
-            existing["display_name"] = display_name or existing.get("display_name", "")
-            existing["google_user_id"] = google_user_id or existing.get("google_user_id", "")
-            existing["last_seen"] = now
-            existing["last_ip"] = source_ip
-            existing["last_app"] = payload.get("app") or existing.get("last_app", "drone_frontend")
-
-        _persist_logged_accounts(_logged_accounts)
+AUTH_MODULE = build_auth_module(
+    logged_accounts_file=LOGGED_ACCOUNTS_FILE,
+    upsert_user=_upsert_app_user,
+    create_token=create_session_token,
+    cookie_header=session_cookie_header,
+    clear_cookie_header=clear_session_cookie_header,
+    session_user_from_headers=session_user_from_headers,
+    token_payload_decoder=_decode_jwt_payload,
+    app_user_upsert_errors=(FlightPlanRepositoryError,),
+)
+FLIGHT_PLANS_MODULE = build_flight_plans_module(
+    pdf_dir=FLIGHT_PLAN_PDF_DIR,
+    create_plan_repo=_store_flight_plan,
+    list_plans_repo=_list_flight_plans_db,
+    get_plan_repo=_get_flight_plan,
+    cancel_plan_repo=_cancel_flight_plan_db,
+    build_flight_plan=_build_flight_plan,
+    build_anexa_payload=_fm.build_anexa_payload,
+    generate_pdf=_generate_anexa1_pdf,
+    assess_flight_area_fn=_assess_flight_area,
+    build_circle_area=_build_circle_area,
+    build_polygon_area=_build_polygon_area,
+    twr_options=_twr_options,
+)
 
 
 def _list_logged_accounts() -> list[dict]:
-    with _account_lock:
-        rows = list(_logged_accounts.values())
-    rows.sort(key=lambda r: r.get("last_seen", ""), reverse=True)
-    return rows
+    return AUTH_MODULE.list_logged_accounts()
 
 
 def _safe_session_user(headers) -> dict | None:
-    user = session_user_from_headers(headers)
-    if not user:
-        return None
-    return {
-        "email": (user.get("email") or "").strip().lower(),
-        "display_name": user.get("display_name") or "",
-        "google_user_id": user.get("google_user_id") or "",
-    }
+    return AUTH_MODULE.current_user(headers)
 
 
 def _require_session_user(headers) -> dict:
@@ -2436,35 +2372,11 @@ def _ensure_db_user(user: dict, app_name: str):
 
 
 def _create_flight_plan_from_payload(payload: dict, owner: dict) -> dict:
-    if _build_flight_plan is None or _generate_anexa1_pdf is None:
-        raise RuntimeError("flight_plan_manager not loaded")
-
-    plan = _build_flight_plan(payload, owner)
-    pdf_path = FLIGHT_PLAN_PDF_DIR / f"{plan['public_id']}.pdf"
-    plan["pdf_rel_path"] = str(pdf_path.relative_to(SCRIPT_DIR.parent))
-    plan["anexa_payload"] = _fm.build_anexa_payload(plan)
-    _generate_anexa1_pdf(plan, pdf_path)
-    try:
-        stored = _store_flight_plan(owner, plan)
-    except Exception:
-        if pdf_path.exists():
-            pdf_path.unlink(missing_ok=True)
-        raise
-    stored["download_url"] = f"/api/flight-plans/{stored['public_id']}/pdf"
-    stored["airspace_assessment"] = plan["airspace_assessment"]
-    return stored
+    return FLIGHT_PLANS_MODULE.create(payload, owner)
 
 
 def _cancel_owned_flight_plan(public_id: str, owner: dict) -> dict:
-    try:
-        cancelled = _cancel_flight_plan_db(public_id, owner_email=owner["email"])
-    except FlightPlanRepositoryError as exc:
-        raise RuntimeError(str(exc)) from exc
-    if not cancelled:
-        raise ValueError("Flight plan cannot be cancelled")
-    cancelled["download_url"] = f"/api/flight-plans/{cancelled['public_id']}/pdf"
-    cancelled["can_cancel"] = False
-    return cancelled
+    return FLIGHT_PLANS_MODULE.cancel(public_id, owner)
 
 
 def _list_flight_plans_response(
@@ -2473,26 +2385,11 @@ def _list_flight_plans_response(
     include_past: bool = False,
     include_cancelled: bool = True,
 ) -> list[dict]:
-    try:
-        plans = _list_flight_plans_db(
-            owner_email=owner_email,
-            include_past=include_past,
-            include_cancelled=include_cancelled,
-        )
-    except FlightPlanRepositoryError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    for plan in plans:
-        if plan.get("public_id"):
-            plan["download_url"] = f"/api/flight-plans/{plan['public_id']}/pdf"
-        runtime_state = (plan.get("runtime_state") or "").lower()
-        workflow_status = (plan.get("workflow_status") or "").lower()
-        plan["can_cancel"] = workflow_status != "cancelled" and runtime_state != "completed"
-    return plans
-
-
-with _account_lock:
-    _logged_accounts.update(_load_logged_accounts())
+    return FLIGHT_PLANS_MODULE.list(
+        owner_email=owner_email,
+        include_past=include_past,
+        include_cancelled=include_cancelled,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -2547,11 +2444,14 @@ class Handler(BaseHTTPRequestHandler):
                 json.dumps({"user": user}).encode(),
             )
 
+        elif path == "/healthz":
+            self._send(200, "application/json; charset=utf-8", b'{"ok": true}')
+
         elif path == "/api/flight-plans/options":
             self._send(
                 200,
                 "application/json; charset=utf-8",
-                json.dumps({"twr_options": _twr_options()}, ensure_ascii=False).encode(),
+                json.dumps({"twr_options": FLIGHT_PLANS_MODULE.twr_options()}, ensure_ascii=False).encode(),
             )
 
         elif path == "/api/flight-plans":
@@ -2580,7 +2480,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/flight-plans/") and path.endswith("/pdf"):
             public_id = path[len("/api/flight-plans/"):-len("/pdf")].strip("/")
             try:
-                plan = _get_flight_plan(public_id)
+                plan = FLIGHT_PLANS_MODULE.get(public_id)
                 if not plan:
                     self._send(404, "application/json; charset=utf-8", b'{"error":"Flight plan not found"}')
                     return
@@ -2668,25 +2568,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw)
                 source_ip = self.client_address[0] if self.client_address else ""
-                _store_logged_account(payload, source_ip)
-                user = {
-                    "email": (payload.get("email") or "").strip().lower(),
-                    "display_name": payload.get("display_name") or "",
-                    "google_user_id": payload.get("google_user_id") or "",
-                }
-                if payload.get("id_token"):
-                    claims = _decode_jwt_payload(payload["id_token"])
-                    user["email"] = (claims.get("email") or user["email"]).strip().lower()
-                    user["display_name"] = claims.get("name") or user["display_name"]
-                    user["google_user_id"] = claims.get("sub") or user["google_user_id"]
-
-                _ensure_db_user(user, payload.get("app") or "drone_frontend")
-                token = create_session_token(user)
+                result = AUTH_MODULE.register_google_session(payload, source_ip)
                 self._send(
                     200,
                     "application/json; charset=utf-8",
-                    json.dumps({"ok": True, "user": user}).encode(),
-                    extra_headers={"Set-Cookie": session_cookie_header(token)},
+                    json.dumps({"ok": True, "user": result["user"]}).encode(),
+                    extra_headers={"Set-Cookie": result["set_cookie"]},
                 )
             except Exception as exc:
                 self._send(400, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
@@ -2696,27 +2583,13 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 "application/json; charset=utf-8",
                 b'{"ok": true}',
-                extra_headers={"Set-Cookie": clear_session_cookie_header()},
+                extra_headers={"Set-Cookie": AUTH_MODULE.clear_cookie_header()},
             )
 
         elif path == "/api/flight-plans/assess":
             try:
                 data = json.loads(raw)
-                if _assess_flight_area is None or _build_circle_area is None:
-                    raise RuntimeError("flight_plan_manager not loaded")
-                area_kind = (data.get("area_kind") or "circle").lower()
-                alt_m = float(data.get("max_altitude_m") or 120)
-                if area_kind == "polygon":
-                    if _build_polygon_area is None:
-                        raise RuntimeError("Polygon support is unavailable")
-                    area = _build_polygon_area(data.get("polygon_points") or [])
-                else:
-                    area = _build_circle_area(
-                        float(data.get("center_lon")),
-                        float(data.get("center_lat")),
-                        float(data.get("radius_m")),
-                    )
-                result = _assess_flight_area(area, alt_m)
+                result = FLIGHT_PLANS_MODULE.assess(data)
                 self._send(
                     200,
                     "application/json; charset=utf-8",
@@ -2827,7 +2700,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description="ROMATSA Multi-Layer Map Server")
-    parser.add_argument("--port", type=int, default=5174, help="Port (default: 5174)")
+    parser.add_argument("--host", default=os.environ.get("DRONE_BIND_HOST", "0.0.0.0"), help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "5174")), help="Port (default: 5174)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     args = parser.parse_args()
 
@@ -2835,6 +2709,8 @@ def main():
     if missing:
         print(f"  Warning: missing layers: {', '.join(missing)}")
         print("  Run:  python3 scripts/fetch_romatsa_data.py\n")
+    if not _fm.ANEXA1_TEMPLATE_PATH.exists():
+        print(f"  Warning: missing ANEXA 1 template: {_fm.ANEXA1_TEMPLATE_PATH}")
 
     url = f"http://localhost:{args.port}"
     found = [k for k, p in LAYER_FILES.items() if p.exists()]
@@ -2844,7 +2720,7 @@ def main():
     print(f"  Flight plans: {url}/admin/flight-plans")
     print("  Press Ctrl-C to stop.\n")
 
-    server = HTTPServer(("", args.port), Handler)
+    server = HTTPServer((args.host, args.port), Handler)
 
     if not args.no_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

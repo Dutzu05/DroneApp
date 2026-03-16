@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -21,11 +22,15 @@ def _psql_binary() -> str:
     if configured:
         return configured
 
+    path_binary = shutil.which("psql")
+    if path_binary:
+        return path_binary
+
     pg_bin = os.environ.get("PG_BIN", "/usr/lib/postgresql/16/bin")
     candidate = Path(pg_bin)
     if candidate.is_dir():
         return str(candidate / "psql")
-    return pg_bin
+    return "psql"
 
 
 def _db_env() -> dict[str, str]:

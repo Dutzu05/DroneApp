@@ -29,8 +29,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
 ANEXA1_TEMPLATE_PATH = Path(
-    os.environ.get("DRONE_ANEXA1_TEMPLATE_PATH", "/home/vlad/Downloads/ANEXA1.pdf")
+    os.environ.get("DRONE_ANEXA1_TEMPLATE_PATH", str(ROOT_DIR / "assets" / "templates" / "ANEXA1.pdf"))
 )
 ROMANIA_TZ = "Europe/Bucharest"
 UAS_CLASS_OPTIONS: dict[str, str] = {

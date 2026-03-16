@@ -1,0 +1,14 @@
+.git/
+.gitignore
+.venv/
+.tooling/
+.postgres/
+.data/
+__pycache__/
+*.pyc
+mobile_app/.dart_tool/
+mobile_app/build/
+mobile_app/.idea/
+tmp_inline_check.js
+tmp_rendered_inline.js
+tmp_rendered_inline.js

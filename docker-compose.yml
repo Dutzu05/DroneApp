@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: drone_app
+      POSTGRES_USER: drone
+      POSTGRES_PASSWORD: drone
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drone -d drone_app"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5174:5174"
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: drone
+      PGPASSWORD: drone
+      DRONE_DB_NAME: drone_app
+      DRONE_GOOGLE_WEB_CLIENT_ID: ${DRONE_GOOGLE_WEB_CLIENT_ID:-1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com}
+      DRONE_ANEXA1_TEMPLATE_PATH: /app/assets/templates/ANEXA1.pdf
+      DRONE_RUN_MIGRATIONS: 1
+    volumes:
+      - app_data:/app/.data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5174/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  app_data:

@@ -68,3 +68,36 @@ For local testing with this setup, add this as an Authorized JavaScript origin i
 
 Start server:
 - `.venv/bin/python scripts/visualise_zones.py --no-browser`
+
+## Backend Architecture
+- The backend is still a modular monolith, but auth and flight-plan orchestration now live under `modules/`
+- Architecture notes:
+  - `docs/backend-architecture.md`
+- Extracted modules:
+  - `modules/auth`
+  - `modules/flight_plans`
+
+## Docker
+- Files added for containerization:
+  - `Dockerfile`
+  - `docker-compose.yml`
+  - `docker/entrypoint.sh`
+  - `requirements.txt`
+- Health endpoint:
+  - `GET /healthz`
+- Default in-container bind:
+  - `0.0.0.0:$PORT`
+- Default ANEXA 1 template path in repo:
+  - `assets/templates/ANEXA1.pdf`
+
+### Run with Docker Compose
+1. Set `DRONE_GOOGLE_WEB_CLIENT_ID`
+2. Run `docker compose up --build`
+3. Open `http://localhost:5174/`
+
+## DigitalOcean
+- Deployment notes:
+  - `docs/digitalocean-deploy.md`
+- The backend can now run either:
+  - on a Droplet with `docker compose`
+  - or in App Platform with an external PostgreSQL database
