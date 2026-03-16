@@ -1,6 +1,7 @@
 # Ignore the local Flutter SDK and Postgres Database
 .tooling/
 .postgres/
+.data/
 
 # Python
 __pycache__/

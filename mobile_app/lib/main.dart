@@ -1,6 +1,9 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:http/http.dart' as http;
 
 import 'data/local_cache_db.dart';
 import 'models/aero_feature.dart';
@@ -12,15 +15,223 @@ void main() {
   runApp(const DroneApp());
 }
 
-class DroneApp extends StatelessWidget {
+const _googleServerClientId =
+    '1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com';
+
+const _googleWebClientId = String.fromEnvironment(
+  'DRONE_GOOGLE_WEB_CLIENT_ID',
+  defaultValue: _googleServerClientId,
+);
+
+const _configuredBackendBaseUrl = String.fromEnvironment(
+  'DRONE_BACKEND_BASE_URL',
+);
+
+String _resolveBackendBaseUrl() {
+  if (_configuredBackendBaseUrl.isNotEmpty) {
+    return _configuredBackendBaseUrl;
+  }
+  if (kIsWeb) {
+    return 'http://localhost:5174';
+  }
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    return 'http://10.0.2.2:5174';
+  }
+  return 'http://localhost:5174';
+}
+
+GoogleSignIn _createGoogleSignIn() {
+  return GoogleSignIn(
+    scopes: const ['email', 'profile'],
+    clientId: kIsWeb ? _googleWebClientId : null,
+    serverClientId: kIsWeb ? null : _googleServerClientId,
+  );
+}
+
+class DroneApp extends StatefulWidget {
   const DroneApp({super.key});
+
+  @override
+  State<DroneApp> createState() => _DroneAppState();
+}
+
+class _DroneAppState extends State<DroneApp> {
+  final _googleSignIn = _createGoogleSignIn();
+  final _backendBaseUrl = _resolveBackendBaseUrl();
+
+  GoogleSignInAccount? _currentUser;
+  String? _error;
+  bool _initializing = true;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreSession();
+  }
+
+  Future<void> _restoreSession() async {
+    try {
+      final user = await _googleSignIn.signInSilently();
+      if (!mounted) return;
+      setState(() {
+        _currentUser = user;
+        _error = null;
+      });
+      if (user != null) {
+        await _reportSession(user);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.toString());
+    } finally {
+      if (mounted) {
+        setState(() => _initializing = false);
+      }
+    }
+  }
+
+  Future<void> _signIn() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+
+    try {
+      final user = await _googleSignIn.signIn();
+      if (user == null) {
+        setState(() => _error = 'Google login cancelled.');
+      } else {
+        await _reportSession(user);
+        if (!mounted) return;
+        setState(() => _currentUser = user);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Login failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _signOut() async {
+    await _googleSignIn.signOut();
+    if (!mounted) return;
+    setState(() => _currentUser = null);
+  }
+
+  Future<void> _reportSession(GoogleSignInAccount user) async {
+    final auth = await user.authentication;
+    final payload = {
+      'email': user.email,
+      'display_name': user.displayName ?? '',
+      'google_user_id': user.id,
+      'id_token': auth.idToken,
+      'app': kIsWeb ? 'mobile_app_web' : 'mobile_app',
+    };
+
+    try {
+      await http
+          .post(
+            Uri.parse('$_backendBaseUrl/api/auth/google-session'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Keep login flow alive even if backend tracking is unavailable.
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Drone Offline Cache',
       theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
-      home: const HomePage(),
+      home: _initializing
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          : _currentUser == null
+              ? LoginScreen(
+                  busy: _busy,
+                  error: _error,
+                  backendBaseUrl: _backendBaseUrl,
+                  onGoogleSignIn: _signIn,
+                )
+              : HomePage(
+                  user: _currentUser!,
+                  onSignOut: _signOut,
+                ),
+    );
+  }
+}
+
+class LoginScreen extends StatelessWidget {
+  const LoginScreen({
+    required this.busy,
+    required this.error,
+    required this.backendBaseUrl,
+    required this.onGoogleSignIn,
+    super.key,
+  });
+
+  final bool busy;
+  final String? error;
+  final String backendBaseUrl;
+  final Future<void> Function() onGoogleSignIn;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Card(
+            margin: const EdgeInsets.all(20),
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Sign in to continue',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Please log in with Google before accessing map and airspace details.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: busy ? null : onGoogleSignIn,
+                    icon: const Icon(Icons.login),
+                    label: Text(busy ? 'Signing in...' : 'Continue with Google'),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Backend session viewer: $backendBaseUrl/admin/logged-accounts',
+                    style: Theme.of(context).textTheme.bodySmall,
+                    textAlign: TextAlign.center,
+                  ),
+                  if (error != null) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      error!,
+                      style: TextStyle(color: Theme.of(context).colorScheme.error),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -30,7 +241,14 @@ class DroneApp extends StatelessWidget {
 // ──────────────────────────────────────────────────────────────────────────
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({
+    required this.user,
+    required this.onSignOut,
+    super.key,
+  });
+
+  final GoogleSignInAccount user;
+  final Future<void> Function() onSignOut;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -48,6 +266,16 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        title: Text('Hi, ${widget.user.displayName ?? widget.user.email}'),
+        actions: [
+          IconButton(
+            tooltip: 'Sign out',
+            onPressed: widget.onSignOut,
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
       body: _tabs[_tabIndex],
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,

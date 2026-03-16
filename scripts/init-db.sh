@@ -13,3 +13,4 @@ if ! "$PG_BIN/psql" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='d
 fi
 
 "$PG_BIN/psql" -d drone_app -f "$ROOT_DIR/sql/restriction_zones_schema.sql"
+"$PG_BIN/psql" -d drone_app -f "$ROOT_DIR/sql/flight_plans_schema.sql"

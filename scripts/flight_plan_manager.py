@@ -21,10 +21,43 @@ from __future__ import annotations
 import json
 import math
 import os
+import secrets
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+ANEXA1_TEMPLATE_PATH = Path(
+    os.environ.get("DRONE_ANEXA1_TEMPLATE_PATH", "/home/vlad/Downloads/ANEXA1.pdf")
+)
+ROMANIA_TZ = "Europe/Bucharest"
+UAS_CLASS_OPTIONS: dict[str, str] = {
+    "PRV250": "Construcție privată <250g",
+    "C0": "C0 <250g",
+    "C1": "C1 250g < 900g",
+    "C2": "C2 900g < 4kg",
+    "C3": "C3 <25kg",
+    "C4": "C4 <25kg",
+    "PRV25": "De construcție privată <25kg",
+}
+# The provided ANEXA 1 PDF exports both C1 and C2 using the same underlying value.
+PDF_CLASS_EXPORT_MAP: dict[str, str] = {
+    "PRV250": "PRV250",
+    "C0": "C0",
+    "C1": "C2",
+    "C2": "C2",
+    "C3": "C3",
+    "C4": "C4",
+    "PRV25": "PRV25",
+}
+CATEGORY_OPTIONS = {"A1", "A2", "A3"}
+OPERATION_MODE_OPTIONS = {"VLOS", "VBLOS"}
+
+
+class FlightPlanValidationError(ValueError):
+    pass
 
 # ──────────────────────────────────────────────────────────────────────────
 # Tower contacts (ANEXA 3 – extracted via OCR, manually corrected)
@@ -206,6 +239,96 @@ CTR_NAME_TO_ICAO: dict[str, str] = {
 }
 
 
+def twr_label(icao: str) -> str:
+    contact = TOWER_CONTACTS.get(icao, {})
+    return f"{contact.get('city', icao)} - {icao}"
+
+
+def available_twr_options() -> list[dict[str, str]]:
+    return [
+        {
+            "icao": icao,
+            "label": twr_label(icao),
+            "name": contact["name"],
+            "email": contact["email"],
+        }
+        for icao, contact in sorted(TOWER_CONTACTS.items())
+        if contact.get("type") == "civil"
+    ]
+
+
+def _clean_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _require_text(payload: dict[str, Any], key: str, label: str) -> str:
+    value = _clean_text(payload.get(key))
+    if not value:
+        raise FlightPlanValidationError(f"{label} is required")
+    return value
+
+
+def _optional_text(payload: dict[str, Any], key: str) -> str:
+    return _clean_text(payload.get(key))
+
+
+def _parse_float(value: Any, label: str) -> float:
+    text = _clean_text(value).replace(",", ".")
+    if not text:
+        raise FlightPlanValidationError(f"{label} is required")
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise FlightPlanValidationError(f"{label} must be numeric") from exc
+
+
+def _parse_schedule(payload: dict[str, Any], now: datetime | None = None) -> tuple[datetime, datetime, str, str]:
+    start_date = _require_text(payload, "start_date", "Start date")
+    end_date = _clean_text(payload.get("end_date")) or start_date
+    start_time = _require_text(payload, "start_time", "Start time")
+    end_time = _require_text(payload, "end_time", "End time")
+    timezone_name = _clean_text(payload.get("timezone")) or ROMANIA_TZ
+
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise FlightPlanValidationError(f"Unsupported timezone: {timezone_name}") from exc
+
+    try:
+        start_local = datetime.strptime(f"{start_date} {start_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+        end_local = datetime.strptime(f"{end_date} {end_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    except ValueError as exc:
+        raise FlightPlanValidationError("Dates must use YYYY-MM-DD and times must use HH:MM") from exc
+
+    if end_local <= start_local:
+        raise FlightPlanValidationError("End date/time must be after start date/time")
+
+    current_local = now.astimezone(tz) if now else datetime.now(tz)
+    if end_local <= current_local:
+        raise FlightPlanValidationError("Flight plan must be ongoing or in the future")
+
+    return (
+        start_local,
+        end_local,
+        start_local.strftime("%d.%m.%Y"),
+        end_local.strftime("%d.%m.%Y"),
+    )
+
+
+def _validate_email(value: str, label: str) -> str:
+    cleaned = _clean_text(value).lower()
+    if "@" not in cleaned or cleaned.startswith("@") or cleaned.endswith("@"):
+        raise FlightPlanValidationError(f"{label} must be a valid email")
+    return cleaned
+
+
+def _validate_phone(value: str, label: str, *, required: bool = True) -> str:
+    cleaned = _clean_text(value)
+    if required and not cleaned:
+        raise FlightPlanValidationError(f"{label} is required")
+    return cleaned
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Geometry helpers
 # ──────────────────────────────────────────────────────────────────────────
@@ -256,6 +379,59 @@ def _point_to_segment_dist_m(
     cx = ax + t * dx
     cy = ay + t * dy
     return haversine_m(px, py, cx, cy)
+
+
+def _segments_intersect(a: list[float], b: list[float], c: list[float], d: list[float]) -> bool:
+    def orientation(p: list[float], q: list[float], r: list[float]) -> int:
+        value = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+        if abs(value) < 1e-12:
+            return 0
+        return 1 if value > 0 else 2
+
+    def on_segment(p: list[float], q: list[float], r: list[float]) -> bool:
+        return (
+            min(p[0], r[0]) - 1e-12 <= q[0] <= max(p[0], r[0]) + 1e-12
+            and min(p[1], r[1]) - 1e-12 <= q[1] <= max(p[1], r[1]) + 1e-12
+        )
+
+    o1 = orientation(a, b, c)
+    o2 = orientation(a, b, d)
+    o3 = orientation(c, d, a)
+    o4 = orientation(c, d, b)
+
+    if o1 != o2 and o3 != o4:
+        return True
+    if o1 == 0 and on_segment(a, c, b):
+        return True
+    if o2 == 0 and on_segment(a, d, b):
+        return True
+    if o3 == 0 and on_segment(c, a, d):
+        return True
+    if o4 == 0 and on_segment(c, b, d):
+        return True
+    return False
+
+
+def polygon_intersects_ring(polygon: list[list[float]], ring: list[list[float]]) -> bool:
+    if not polygon or not ring:
+        return False
+
+    for point in polygon:
+        if point_in_polygon(point[0], point[1], ring):
+            return True
+    for point in ring:
+        if point_in_polygon(point[0], point[1], polygon):
+            return True
+
+    for i in range(len(polygon)):
+        pa = polygon[i]
+        pb = polygon[(i + 1) % len(polygon)]
+        for j in range(len(ring)):
+            ra = ring[j]
+            rb = ring[(j + 1) % len(ring)]
+            if _segments_intersect(pa, pb, ra, rb):
+                return True
+    return False
 
 
 def circle_intersects_ring(
@@ -312,6 +488,67 @@ def circle_intersects_feature(
     return False
 
 
+def polygon_intersects_feature(
+    polygon: list[list[float]],
+    feat: dict,
+    alt_m: float | None = None,
+) -> bool:
+    geom = feat.get("geometry")
+    if not geom:
+        return False
+
+    if alt_m is not None:
+        p = feat.get("properties", {})
+        lo = p.get("lower_limit_m")
+        up = p.get("upper_limit_m")
+        if lo is not None and up is not None and (alt_m < lo or alt_m > up):
+            return False
+
+    gtype = geom.get("type", "")
+    coords = geom.get("coordinates", [])
+
+    if gtype == "Polygon":
+        return any(polygon_intersects_ring(polygon, ring) for ring in coords)
+    if gtype == "MultiPolygon":
+        return any(
+            polygon_intersects_ring(polygon, ring)
+            for poly in coords
+            for ring in poly
+        )
+    return False
+
+
+def build_circle_area(lon: float, lat: float, radius_m: float) -> dict[str, Any]:
+    return {
+        "kind": "circle",
+        "center_lon": lon,
+        "center_lat": lat,
+        "radius_m": radius_m,
+    }
+
+
+def build_polygon_area(points: list[list[float]]) -> dict[str, Any]:
+    clean_points = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise FlightPlanValidationError("Polygon points must be [lon, lat] pairs")
+        lon = float(point[0])
+        lat = float(point[1])
+        if not -180 <= lon <= 180:
+            raise FlightPlanValidationError("Polygon longitude must be between -180 and 180")
+        if not -90 <= lat <= 90:
+            raise FlightPlanValidationError("Polygon latitude must be between -90 and 90")
+        clean_points.append([lon, lat])
+    if len(clean_points) < 3 or len(clean_points) > 5:
+        raise FlightPlanValidationError("Polygon area must contain between 3 and 5 vertices")
+    if clean_points[0] == clean_points[-1]:
+        clean_points = clean_points[:-1]
+    return {
+        "kind": "polygon",
+        "points": clean_points,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Layer access
 # ──────────────────────────────────────────────────────────────────────────
@@ -333,6 +570,87 @@ def _load(layer_key: str) -> dict:
         p = LAYER_FILES[layer_key]
         _geojson_cache[layer_key] = json.loads(p.read_text())
     return _geojson_cache[layer_key]
+
+
+def assess_flight_area(area: dict[str, Any], alt_m: float) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "area": area,
+        "alt_m": alt_m,
+        "ctr_hits": [],
+        "uas_hits": [],
+        "notam_hits": [],
+        "tma_hits": [],
+        "tower_contacts": [],
+        "risk_level": "LOW",
+        "summary": "",
+        "eligibility_status": "ready",
+        "warnings": [],
+    }
+
+    def matches(feat: dict) -> bool:
+        if area["kind"] == "circle":
+            return circle_intersects_feature(
+                area["center_lon"],
+                area["center_lat"],
+                area["radius_m"],
+                feat,
+                alt_m,
+            )
+        return polygon_intersects_feature(area["points"], feat, alt_m)
+
+    ctr_data = _load("ctr")
+    for feat in ctr_data.get("features", []):
+        if matches(feat):
+            p = feat.get("properties", {})
+            result["ctr_hits"].append(p)
+            name = (p.get("name") or p.get("arsp_name") or "").upper()
+            icao = p.get("icao") or _resolve_icao(name)
+            if icao and icao in TOWER_CONTACTS:
+                contact = {**TOWER_CONTACTS[icao], "icao": icao}
+                if contact not in result["tower_contacts"]:
+                    result["tower_contacts"].append(contact)
+
+    for layer_key, key in (("uas_zones", "uas_hits"), ("notam", "notam_hits"), ("tma", "tma_hits")):
+        layer_data = _load(layer_key)
+        for feat in layer_data.get("features", []):
+            if matches(feat):
+                result[key].append(feat.get("properties", {}))
+
+    ctr_count = len(result["ctr_hits"])
+    uas_count = len(result["uas_hits"])
+    notam_count = len(result["notam_hits"])
+    tma_count = len(result["tma_hits"])
+
+    if ctr_count or uas_count:
+        result["risk_level"] = "HIGH"
+    elif notam_count or tma_count:
+        result["risk_level"] = "MEDIUM"
+
+    summary_parts = []
+    if ctr_count:
+        ctr_names = [h.get("name") or h.get("arsp_name") or "CTR" for h in result["ctr_hits"]]
+        summary_parts.append(f"CTR overlap: {', '.join(ctr_names)}")
+    if uas_count:
+        summary_parts.append(f"{uas_count} UAS restriction zone(s)")
+    if notam_count:
+        summary_parts.append(f"{notam_count} NOTAM zone(s)")
+    if tma_count:
+        summary_parts.append(f"{tma_count} TMA zone(s) at {alt_m:.0f} m")
+    if not summary_parts:
+        summary_parts.append("No conflicting airspace found")
+
+    if uas_count:
+        result["eligibility_status"] = "manual_review"
+        result["warnings"].append(
+            "ANEXA 1 notes say open-category flights in CTR are considered authorized only outside restricted UAS geographical zones."
+        )
+    if result["risk_level"] == "HIGH":
+        result["warnings"].append("High-risk airspace overlap detected. Manual review is required before relying on this plan.")
+    elif result["risk_level"] == "MEDIUM":
+        result["warnings"].append("Additional coordination may be needed because NOTAM/TMA overlaps were detected.")
+
+    result["summary"] = ". ".join(summary_parts) + "."
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -358,76 +676,8 @@ def area_check(
       risk_level      – "LOW" | "MEDIUM" | "HIGH"
       summary         – human-readable summary string
     """
-    result: dict[str, Any] = {
-        "location": {"lon": lon, "lat": lat, "radius_m": radius_m, "alt_m": alt_m},
-        "ctr_hits": [],
-        "uas_hits": [],
-        "notam_hits": [],
-        "tma_hits": [],
-        "tower_contacts": [],
-        "risk_level": "LOW",
-        "summary": "",
-    }
-
-    # CTR check (no altitude filter – CTR goes to GND)
-    ctr_data = _load("ctr")
-    for feat in ctr_data.get("features", []):
-        if circle_intersects_feature(lon, lat, radius_m, feat):
-            p = feat.get("properties", {})
-            result["ctr_hits"].append(p)
-            # Resolve tower contact
-            name = (p.get("name") or p.get("arsp_name") or "").upper()
-            icao = p.get("icao") or _resolve_icao(name)
-            if icao and icao in TOWER_CONTACTS:
-                contact = {**TOWER_CONTACTS[icao], "icao": icao}
-                if contact not in result["tower_contacts"]:
-                    result["tower_contacts"].append(contact)
-
-    # UAS restriction zones (no altitude filter here – show all)
-    uas_data = _load("uas_zones")
-    for feat in uas_data.get("features", []):
-        if circle_intersects_feature(lon, lat, radius_m, feat, alt_m):
-            result["uas_hits"].append(feat.get("properties", {}))
-
-    # NOTAM zones
-    notam_data = _load("notam")
-    for feat in notam_data.get("features", []):
-        if circle_intersects_feature(lon, lat, radius_m, feat, alt_m):
-            result["notam_hits"].append(feat.get("properties", {}))
-
-    # TMA (with altitude filter)
-    tma_data = _load("tma")
-    for feat in tma_data.get("features", []):
-        if circle_intersects_feature(lon, lat, radius_m, feat, alt_m):
-            result["tma_hits"].append(feat.get("properties", {}))
-
-    # Risk level
-    ctr_count  = len(result["ctr_hits"])
-    uas_count  = len(result["uas_hits"])
-    notam_count = len(result["notam_hits"])
-
-    if ctr_count > 0 or uas_count > 0:
-        result["risk_level"] = "HIGH"
-    elif notam_count > 0 or len(result["tma_hits"]) > 0:
-        result["risk_level"] = "MEDIUM"
-    else:
-        result["risk_level"] = "LOW"
-
-    # Summary
-    parts = []
-    if ctr_count:
-        names = [h.get("name") or h.get("arsp_name") or "CTR" for h in result["ctr_hits"]]
-        parts.append(f"Inside CTR: {', '.join(names)}")
-    if uas_count:
-        parts.append(f"{uas_count} UAS restriction zone(s)")
-    if notam_count:
-        parts.append(f"{notam_count} active NOTAM zone(s)")
-    if result["tma_hits"]:
-        parts.append(f"{len(result['tma_hits'])} TMA zone(s) at {alt_m} m")
-    if not parts:
-        parts.append("No conflicting airspace found")
-
-    result["summary"] = ". ".join(parts) + "."
+    result = assess_flight_area(build_circle_area(lon, lat, radius_m), alt_m)
+    result["location"] = {"lon": lon, "lat": lat, "radius_m": radius_m, "alt_m": alt_m}
     return result
 
 
@@ -449,6 +699,180 @@ def _resolve_icao(ctr_name: str) -> str | None:
         if city in ctr_name:
             return icao
     return None
+
+
+def _normalize_area(payload: dict[str, Any]) -> dict[str, Any]:
+    area_kind = (_clean_text(payload.get("area_kind")) or "circle").lower()
+    if area_kind == "circle":
+        center_lon = _parse_float(payload.get("center_lon"), "Center longitude")
+        center_lat = _parse_float(payload.get("center_lat"), "Center latitude")
+        radius_m = _parse_float(payload.get("radius_m"), "Radius")
+        if not -180 <= center_lon <= 180:
+            raise FlightPlanValidationError("Center longitude must be between -180 and 180")
+        if not -90 <= center_lat <= 90:
+            raise FlightPlanValidationError("Center latitude must be between -90 and 90")
+        if radius_m <= 0:
+            raise FlightPlanValidationError("Radius must be greater than 0")
+        return build_circle_area(center_lon, center_lat, radius_m)
+    if area_kind == "polygon":
+        return build_polygon_area(payload.get("polygon_points") or [])
+    raise FlightPlanValidationError("Area kind must be circle or polygon")
+
+
+def area_to_geojson(area: dict[str, Any]) -> dict[str, Any]:
+    if area["kind"] == "circle":
+        return {
+            "type": "Feature",
+            "properties": {"shape": "circle", "radius_m": area["radius_m"]},
+            "geometry": {
+                "type": "Point",
+                "coordinates": [area["center_lon"], area["center_lat"]],
+            },
+        }
+    polygon = list(area["points"])
+    if polygon[0] != polygon[-1]:
+        polygon = polygon + [polygon[0]]
+    return {
+        "type": "Feature",
+        "properties": {"shape": "polygon"},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [polygon],
+        },
+    }
+
+
+def _build_public_id(now: datetime | None = None) -> str:
+    moment = now or datetime.utcnow()
+    return f"FP-{moment.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
+
+
+def build_anexa_payload(plan: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "operator": plan["operator_name"],
+        "date_contact": plan["operator_contact"],
+        "fax": plan.get("fax", ""),
+        "email": plan["operator_email"],
+        "pers_contact": plan["contact_person"],
+        "telefon_fix": plan.get("phone_landline", ""),
+        "mobil": plan["phone_mobile"],
+        "inmatriculare": plan["uas_registration"],
+        "greutate": f"{plan['mtom_kg']:.3f}".rstrip("0").rstrip("."),
+        "clasa": PDF_CLASS_EXPORT_MAP[plan["uas_class_code"]],
+        "categorie": plan["category"],
+        "mod_operare": plan["operation_mode"],
+        "twr": plan["selected_twr"],
+        "pilot_name": plan["pilot_name"],
+        "pilot_phone": plan["pilot_phone"],
+        "scop_zbor": plan["purpose"],
+        "alt_max_m": f"{plan['max_altitude_m']:.0f}",
+        "data_start": plan["pdf_start_date"],
+        "data_end": plan["pdf_end_date"],
+        "ora_start": plan["pdf_start_time"],
+        "ora_end": plan["pdf_end_time"],
+        "localitatea": plan["location_name"],
+    }
+    if plan["area_kind"] == "circle":
+        payload["center_lon"] = plan["center_lon"]
+        payload["center_lat"] = plan["center_lat"]
+        payload["radius_m"] = plan["radius_m"]
+    else:
+        payload["polygon"] = plan["polygon_points"]
+    return payload
+
+
+def validate_and_build_flight_plan(
+    payload: dict[str, Any],
+    actor: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    owner_email = _validate_email(actor.get("email") or "", "Logged in user email")
+    owner_display_name = _clean_text(actor.get("display_name")) or owner_email
+    owner_google_user_id = _clean_text(actor.get("google_user_id"))
+
+    operator_email = _validate_email(
+        payload.get("operator_email") or owner_email,
+        "Operator email",
+    )
+    operator_name = _require_text(payload, "operator_name", "Operator name")
+    operator_contact = _require_text(payload, "operator_contact", "Operator contact")
+    contact_person = _require_text(payload, "contact_person", "Contact person")
+    phone_mobile = _validate_phone(payload.get("phone_mobile"), "Mobile phone")
+    phone_landline = _validate_phone(payload.get("phone_landline"), "Landline phone", required=False)
+    fax = _optional_text(payload, "fax")
+    uas_registration = _require_text(payload, "uas_registration", "UAS registration")
+    uas_class_code = (_require_text(payload, "uas_class_code", "UAS class")).upper()
+    if uas_class_code not in UAS_CLASS_OPTIONS:
+        raise FlightPlanValidationError("Unsupported UAS class")
+    uas_class_label = UAS_CLASS_OPTIONS[uas_class_code]
+    category = (_require_text(payload, "category", "Flight category")).upper()
+    if category not in CATEGORY_OPTIONS:
+        raise FlightPlanValidationError("Unsupported flight category")
+    operation_mode = (_require_text(payload, "operation_mode", "Operation mode")).upper()
+    if operation_mode not in OPERATION_MODE_OPTIONS:
+        raise FlightPlanValidationError("Unsupported operation mode")
+
+    mtom_kg = _parse_float(payload.get("mtom_kg"), "MTOM (kg)")
+    max_altitude_m = _parse_float(payload.get("max_altitude_m"), "Maximum altitude")
+    if max_altitude_m < 0 or max_altitude_m > 120:
+        raise FlightPlanValidationError("Maximum altitude must be between 0 and 120 metres AGL for ANEXA 1")
+
+    selected_twr = (_require_text(payload, "selected_twr", "Selected TWR")).upper()
+    if selected_twr not in TOWER_CONTACTS:
+        raise FlightPlanValidationError("Selected TWR is not recognised")
+
+    pilot_name = _require_text(payload, "pilot_name", "Pilot name")
+    pilot_phone = _validate_phone(payload.get("pilot_phone"), "Pilot phone")
+    purpose = _require_text(payload, "purpose", "Flight purpose")
+    location_name = _require_text(payload, "location_name", "Location/locality")
+    area = _normalize_area(payload)
+    start_local, end_local, pdf_start_date, pdf_end_date = _parse_schedule(payload, now=now)
+
+    assessment = assess_flight_area(area, max_altitude_m)
+
+    return {
+        "public_id": _build_public_id(now),
+        "owner_email": owner_email,
+        "owner_display_name": owner_display_name,
+        "owner_google_user_id": owner_google_user_id,
+        "operator_name": operator_name,
+        "operator_contact": operator_contact,
+        "contact_person": contact_person,
+        "phone_landline": phone_landline,
+        "phone_mobile": phone_mobile,
+        "fax": fax,
+        "operator_email": operator_email,
+        "uas_registration": uas_registration,
+        "uas_class_code": uas_class_code,
+        "uas_class_label": uas_class_label,
+        "category": category,
+        "operation_mode": operation_mode,
+        "mtom_kg": mtom_kg,
+        "pilot_name": pilot_name,
+        "pilot_phone": pilot_phone,
+        "purpose": purpose,
+        "local_timezone": _clean_text(payload.get("timezone")) or ROMANIA_TZ,
+        "scheduled_start_at": start_local.astimezone(ZoneInfo("UTC")).isoformat(),
+        "scheduled_end_at": end_local.astimezone(ZoneInfo("UTC")).isoformat(),
+        "pdf_start_date": pdf_start_date,
+        "pdf_end_date": pdf_end_date,
+        "pdf_start_time": start_local.strftime("%H:%M"),
+        "pdf_end_time": end_local.strftime("%H:%M"),
+        "location_name": location_name,
+        "area_kind": area["kind"],
+        "center_lon": area.get("center_lon"),
+        "center_lat": area.get("center_lat"),
+        "radius_m": area.get("radius_m"),
+        "polygon_points": area.get("points"),
+        "area_geojson": area_to_geojson(area),
+        "max_altitude_m": max_altitude_m,
+        "selected_twr": selected_twr,
+        "risk_level": assessment["risk_level"],
+        "risk_summary": assessment["summary"],
+        "airspace_assessment": assessment,
+        "created_from_app": _clean_text(payload.get("created_from_app")) or "visualise_zones_web",
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -504,7 +928,7 @@ def fill_anexa1(
     """
     try:
         from pypdf import PdfReader, PdfWriter
-        from pypdf.generic import NameObject, create_string_object
+        from pypdf.generic import BooleanObject, NameObject
     except ImportError:
         raise RuntimeError("pypdf is required: pip install pypdf")
 
@@ -575,6 +999,7 @@ def fill_anexa1(
     # Write fields to all pages
     for page in writer.pages:
         writer.update_page_form_field_values(page, fv)
+    writer._root_object.update({NameObject("/NeedAppearances"): BooleanObject(True)})
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -582,6 +1007,15 @@ def fill_anexa1(
         writer.write(f)
 
     return out
+
+
+def generate_anexa1_pdf(
+    plan: dict[str, Any],
+    output_path: str | Path,
+    *,
+    template_path: str | Path = ANEXA1_TEMPLATE_PATH,
+) -> Path:
+    return fill_anexa1(template_path, output_path, build_anexa_payload(plan))
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -603,7 +1037,7 @@ def main():
 
     # fill-pdf subcommand
     fp = sub.add_parser("fill-pdf", help="Fill ANEXA 1 PDF form")
-    fp.add_argument("--template", default="/home/vlad/Downloads/ANEXA1.pdf",
+    fp.add_argument("--template", default=str(ANEXA1_TEMPLATE_PATH),
                     help="Template PDF path")
     fp.add_argument("--output", required=True, help="Output PDF path")
     fp.add_argument("--config", required=True, help="JSON file with flight plan data")

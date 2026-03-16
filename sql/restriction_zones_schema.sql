@@ -20,9 +20,49 @@ CREATE TABLE IF NOT EXISTS restriction_zones (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rz_zone_code ON restriction_zones(zone_code);
-CREATE INDEX IF NOT EXISTS idx_rz_lower_limit ON restriction_zones(lower_limit_m);
-CREATE INDEX IF NOT EXISTS idx_rz_upper_limit ON restriction_zones(upper_limit_m);
 CREATE INDEX IF NOT EXISTS idx_rz_geojson_gin ON restriction_zones USING GIN (geometry_geojson);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'restriction_zones'
+      AND column_name = 'lower_limit_m'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_rz_lower_limit ON restriction_zones(lower_limit_m)';
+  ELSIF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'restriction_zones'
+      AND column_name = 'min_altitude_m'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_rz_lower_limit ON restriction_zones(min_altitude_m)';
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'restriction_zones'
+      AND column_name = 'upper_limit_m'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_rz_upper_limit ON restriction_zones(upper_limit_m)';
+  ELSIF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'restriction_zones'
+      AND column_name = 'max_altitude_m'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_rz_upper_limit ON restriction_zones(max_altitude_m)';
+  END IF;
+END $$;
 
 -- Useful query: zones relevant for a flight at N metres AGL
 -- SELECT * FROM restriction_zones
