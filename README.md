@@ -95,6 +95,21 @@ Start server:
 2. Run `docker compose up --build`
 3. Open `http://localhost:5174/`
 
+## Airspace Backend
+- FastAPI app: `uvicorn backend.app:app --host 0.0.0.0 --port 8080`
+- PostGIS schema: `sql/airspace_schema.sql`
+- One-shot ingestion: `python3 scripts/ingest_airspace.py`
+- Scheduler: `python3 -m backend.airspace.ingestion.scheduler`
+- Docker services:
+  - legacy map UI: `http://localhost:5174/`
+  - airspace API: `http://localhost:8080/healthz`
+- Main endpoints:
+  - `GET /airspace/zones?bbox=minLon,minLat,maxLon,maxLat`
+  - `GET /airspace/zones/near?lat=46.77&lon=23.59&radius_km=10`
+  - `GET /airspace/check-point?lat=46.77&lon=23.59&alt_m=120`
+  - `POST /airspace/check-route`
+- Architecture notes: `docs/airspace-backend.md`
+
 ## DigitalOcean
 - Deployment notes:
   - `docs/digitalocean-deploy.md`

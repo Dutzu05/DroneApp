@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16
+    image: postgis/postgis:16-3.4
     restart: unless-stopped
     environment:
       POSTGRES_DB: drone_app
@@ -38,6 +38,43 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+
+  airspace-api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: drone
+      PGPASSWORD: drone
+      DRONE_DB_NAME: drone_app
+      DRONE_RUN_MIGRATIONS: 1
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  airspace-scheduler:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python3", "-m", "backend.airspace.ingestion.scheduler"]
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: drone
+      PGPASSWORD: drone
+      DRONE_DB_NAME: drone_app
+      DRONE_RUN_MIGRATIONS: 1
 
 volumes:
   postgres_data:
