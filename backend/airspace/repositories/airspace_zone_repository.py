@@ -149,3 +149,23 @@ class AirspaceZoneRepository:
                 (wkt, max_alt, max_alt, max_alt, max_alt),
             )
             return list(cur.fetchall())
+
+    def zones_for_geometry(self, *, geometry_geojson: dict[str, Any], alt_m: float | None) -> list[dict[str, Any]]:
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT zone_id, source, name, category, lower_altitude_m, upper_altitude_m,
+                       valid_from, valid_to, metadata,
+                       ST_AsGeoJSON(geometry)::jsonb AS geometry
+                FROM airspace_zones_active
+                WHERE ST_Intersects(
+                    geometry,
+                    ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+                )
+                  AND (%s IS NULL OR lower_altitude_m IS NULL OR lower_altitude_m <= %s)
+                  AND (%s IS NULL OR upper_altitude_m IS NULL OR upper_altitude_m >= %s)
+                ORDER BY source, name
+                """,
+                (json.dumps(geometry_geojson), alt_m, alt_m, alt_m, alt_m),
+            )
+            return list(cur.fetchall())

@@ -30,6 +30,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from backend.airspace.services.flight_area_assessment_service import (
+    build_flight_area_assessment_service,
+)
+
 ANEXA1_TEMPLATE_PATH = Path(
     os.environ.get("DRONE_ANEXA1_TEMPLATE_PATH", str(ROOT_DIR / "assets" / "templates" / "ANEXA1.pdf"))
 )
@@ -575,25 +582,7 @@ def point_matches_feature(
 
 
 def find_blocking_center_hits(lon: float, lat: float, alt_m: float) -> list[dict[str, Any]]:
-    hits: list[dict[str, Any]] = []
-    for layer_key in ("ctr", "uas_zones", "notam", "tma"):
-        layer_data = _load(layer_key)
-        for feat in layer_data.get("features", []):
-            if point_matches_feature(lon, lat, feat, alt_m):
-                props = feat.get("properties", {})
-                hits.append(
-                    {
-                        "layer_key": layer_key,
-                        "label": layer_key.replace("_", " ").upper(),
-                        "name": props.get("zone_id")
-                        or props.get("zone_code")
-                        or props.get("notam_id")
-                        or props.get("name")
-                        or props.get("arsp_name")
-                        or layer_key,
-                    }
-                )
-    return hits
+    return _airspace_service().blocking_center_hits(lon=lon, lat=lat, alt_m=alt_m)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -611,6 +600,7 @@ LAYER_FILES = {
 }
 
 _geojson_cache: dict[str, dict] = {}
+_airspace_assessment_service = None
 
 def _load(layer_key: str) -> dict:
     if layer_key not in _geojson_cache:
@@ -619,85 +609,32 @@ def _load(layer_key: str) -> dict:
     return _geojson_cache[layer_key]
 
 
+def _airspace_service():
+    global _airspace_assessment_service
+    if _airspace_assessment_service is None:
+        _airspace_assessment_service = build_flight_area_assessment_service()
+    return _airspace_assessment_service
+
+
 def assess_flight_area(area: dict[str, Any], alt_m: float) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "area": area,
-        "alt_m": alt_m,
-        "ctr_hits": [],
-        "uas_hits": [],
-        "notam_hits": [],
-        "tma_hits": [],
-        "tower_contacts": [],
-        "risk_level": "LOW",
-        "summary": "",
-        "eligibility_status": "ready",
-        "warnings": [],
-    }
+    return _airspace_service().assess_area(
+        area=area,
+        alt_m=alt_m,
+        tower_contacts=TOWER_CONTACTS,
+        resolve_icao=_resolve_icao,
+    )
 
-    def matches(feat: dict) -> bool:
-        if area["kind"] == "circle":
-            return circle_intersects_feature(
-                area["center_lon"],
-                area["center_lat"],
-                area["radius_m"],
-                feat,
-                alt_m,
-            )
-        return polygon_intersects_feature(area["points"], feat, alt_m)
 
-    ctr_data = _load("ctr")
-    for feat in ctr_data.get("features", []):
-        if matches(feat):
-            p = feat.get("properties", {})
-            result["ctr_hits"].append(p)
-            name = (p.get("name") or p.get("arsp_name") or "").upper()
-            icao = p.get("icao") or _resolve_icao(name)
-            if icao and icao in TOWER_CONTACTS:
-                contact = {**TOWER_CONTACTS[icao], "icao": icao}
-                if contact not in result["tower_contacts"]:
-                    result["tower_contacts"].append(contact)
+def crosscheck_point(lon: float, lat: float, alt_m: float) -> dict[str, list[dict[str, Any]]]:
+    return _airspace_service().crosscheck_point(lon=lon, lat=lat, alt_m=alt_m)
 
-    for layer_key, key in (("uas_zones", "uas_hits"), ("notam", "notam_hits"), ("tma", "tma_hits")):
-        layer_data = _load(layer_key)
-        for feat in layer_data.get("features", []):
-            if matches(feat):
-                result[key].append(feat.get("properties", {}))
 
-    ctr_count = len(result["ctr_hits"])
-    uas_count = len(result["uas_hits"])
-    notam_count = len(result["notam_hits"])
-    tma_count = len(result["tma_hits"])
+def check_point(lon: float, lat: float, alt_m: float) -> dict[str, Any]:
+    return _airspace_service().check_point(lon=lon, lat=lat, alt_m=alt_m)
 
-    if ctr_count or uas_count:
-        result["risk_level"] = "HIGH"
-    elif notam_count or tma_count:
-        result["risk_level"] = "MEDIUM"
 
-    summary_parts = []
-    if ctr_count:
-        ctr_names = [h.get("name") or h.get("arsp_name") or "CTR" for h in result["ctr_hits"]]
-        summary_parts.append(f"CTR overlap: {', '.join(ctr_names)}")
-    if uas_count:
-        summary_parts.append(f"{uas_count} UAS restriction zone(s)")
-    if notam_count:
-        summary_parts.append(f"{notam_count} NOTAM zone(s)")
-    if tma_count:
-        summary_parts.append(f"{tma_count} TMA zone(s) at {alt_m:.0f} m")
-    if not summary_parts:
-        summary_parts.append("No conflicting airspace found")
-
-    if uas_count:
-        result["eligibility_status"] = "manual_review"
-        result["warnings"].append(
-            "ANEXA 1 notes say open-category flights in CTR are considered authorized only outside restricted UAS geographical zones."
-        )
-    if result["risk_level"] == "HIGH":
-        result["warnings"].append("High-risk airspace overlap detected. Manual review is required before relying on this plan.")
-    elif result["risk_level"] == "MEDIUM":
-        result["warnings"].append("Additional coordination may be needed because NOTAM/TMA overlaps were detected.")
-
-    result["summary"] = ". ".join(summary_parts) + "."
-    return result
+def check_route(path: list[dict[str, float]]) -> dict[str, Any]:
+    return _airspace_service().check_route(path)
 
 
 # ──────────────────────────────────────────────────────────────────────────

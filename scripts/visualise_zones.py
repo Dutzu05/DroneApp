@@ -39,7 +39,7 @@ import threading
 import time
 import sys
 import webbrowser
-from datetime import datetime
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -78,6 +78,9 @@ if _FM_PATH.exists():
     TOWER_CONTACTS = _fm.TOWER_CONTACTS
     _area_check    = _fm.area_check
     _assess_flight_area = _fm.assess_flight_area
+    _crosscheck_point = _fm.crosscheck_point
+    _check_point = _fm.check_point
+    _check_route = _fm.check_route
     _build_circle_area = _fm.build_circle_area
     _build_polygon_area = _fm.build_polygon_area
     _build_flight_plan = _fm.validate_and_build_flight_plan
@@ -88,6 +91,9 @@ else:
     TOWER_CONTACTS = {}
     _area_check    = None
     _assess_flight_area = None
+    _crosscheck_point = None
+    _check_point = None
+    _check_route = None
     _build_circle_area = None
     _build_polygon_area = None
     _build_flight_plan = None
@@ -1550,18 +1556,54 @@ function formatBlockingHit(feature, layerKey) {
   };
 }
 
-function findBlockingCircleCenterHits(lon, lat, altM) {
-  var hits = [];
-  CENTER_BLOCKING_LAYER_KEYS.forEach(function(layerKey) {
-    var data = rawData[layerKey];
-    if (!data || !data.features) return;
-    data.features.forEach(function(feature) {
-      if (featureContainsPointJs(feature, lon, lat, altM)) {
-        hits.push(formatBlockingHit(feature, layerKey));
-      }
-    });
+function layerKeyFromAirspaceZone(zone) {
+  var source = ((zone && zone.source) || '').toLowerCase();
+  var category = ((zone && zone.category) || '').toLowerCase();
+  if (category === 'ctr' || source.indexOf('_ctr') >= 0) return 'ctr';
+  if (category === 'tma' || source.indexOf('_tma') >= 0) return 'tma';
+  if (category === 'temporary_restriction' || source.indexOf('notam') >= 0) return 'notam';
+  return 'uas_zones';
+}
+
+async function fetchPointCheck(lon, lat, altM) {
+  const res = await fetch(
+    '/airspace/check-point?lon=' + encodeURIComponent(lon) +
+    '&lat=' + encodeURIComponent(lat) +
+    '&alt_m=' + encodeURIComponent(altM)
+  );
+  const data = await res.json().catch(function() { return {}; });
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || 'Airspace point check failed.');
+  }
+  return data;
+}
+
+async function fetchRouteCheck(pathPoints) {
+  const res = await fetch('/airspace/check-route', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: pathPoints }),
   });
-  return hits;
+  const data = await res.json().catch(function() { return {}; });
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || 'Airspace route check failed.');
+  }
+  return data;
+}
+
+function pointCheckToBlockingHits(data) {
+  return ((data && data.zones) || [])
+    .map(function(zone) {
+      var layerKey = layerKeyFromAirspaceZone(zone);
+      return {
+        layerKey: layerKey,
+        label: (LAYERS_CFG[layerKey] && LAYERS_CFG[layerKey].label) || layerKey,
+        name: zone.zone_id || zone.name || layerKey,
+      };
+    })
+    .filter(function(hit) {
+      return CENTER_BLOCKING_LAYER_KEYS.indexOf(hit.layerKey) >= 0;
+    });
 }
 
 function summarizeBlockingHits(hits) {
@@ -1584,11 +1626,18 @@ function rejectCircleCenter(hits, interactive) {
   return false;
 }
 
-function setCircleCenter(lat, lon, interactive, syncInputs) {
+async function setCircleCenter(lat, lon, interactive, syncInputs) {
   var altM = parseFloat(document.getElementById('fpAlt').value) || 120;
-  var hits = findBlockingCircleCenterHits(lon, lat, altM);
-  if (hits.length) {
-    return rejectCircleCenter(hits, interactive);
+  try {
+    var hits = pointCheckToBlockingHits(await fetchPointCheck(lon, lat, altM));
+    if (hits.length) {
+      return rejectCircleCenter(hits, interactive);
+    }
+  } catch (err) {
+    if (interactive) {
+      alert(err && err.message ? err.message : 'Airspace point check failed.');
+    }
+    return false;
   }
   fpCentre = { lat: lat, lon: lon };
   if (syncInputs) {
@@ -1664,11 +1713,82 @@ function startAreaSelection() {
       : 'Click the map to place the circular area centre.';
 }
 
+let fpCircleSyncTimer = null;
+
 function syncCircleFromInputs() {
+  clearTimeout(fpCircleSyncTimer);
+  fpCircleSyncTimer = setTimeout(async function() {
   var lat = parseFloat(document.getElementById('fpLat').value);
   var lon = parseFloat(document.getElementById('fpLon').value);
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    setCircleCenter(lat, lon, false, false);
+      await setCircleCenter(lat, lon, false, false);
+  }
+  }, 250);
+}
+
+async function ensureCircleSelection() {
+  if ((document.getElementById('fpAreaKind').value || 'circle') !== 'circle') {
+    return;
+  }
+  var lat = parseFloat(document.getElementById('fpLat').value);
+  var lon = parseFloat(document.getElementById('fpLon').value);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    if (!fpCentre || Math.abs(fpCentre.lat - lat) > 0.000001 || Math.abs(fpCentre.lon - lon) > 0.000001) {
+      var ok = await setCircleCenter(lat, lon, false, false);
+      if (!ok) {
+        throw new Error(document.getElementById('fpCircleInfo').textContent || 'Circle centre is not allowed.');
+      }
+    }
+    return;
+  }
+  if (!fpCentre) {
+    throw new Error('Set the circular area centre first.');
+  }
+}
+
+function buildRoutePathForArea(payload, altM) {
+  if (payload.area_kind === 'polygon') {
+    var path = payload.polygon_points.slice().map(function(point) {
+      return { lon: point[0], lat: point[1], alt_m: altM };
+    });
+    if (path.length && (path[0].lon !== path[path.length - 1].lon || path[0].lat !== path[path.length - 1].lat)) {
+      path.push({ lon: path[0].lon, lat: path[0].lat, alt_m: altM });
+    }
+    return path;
+  }
+
+  var radiusM = parseFloat(payload.radius_m) || 0;
+  var steps = 16;
+  var latRad = payload.center_lat * Math.PI / 180;
+  var angularDistance = radiusM / 6371000;
+  var path = [];
+  for (var i = 0; i <= steps; i += 1) {
+    var bearing = (2 * Math.PI * i) / steps;
+    var lat2 = Math.asin(
+      Math.sin(latRad) * Math.cos(angularDistance) +
+      Math.cos(latRad) * Math.sin(angularDistance) * Math.cos(bearing)
+    );
+    var lon2 = (payload.center_lon * Math.PI / 180) + Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latRad),
+      Math.cos(angularDistance) - Math.sin(latRad) * Math.sin(lat2)
+    );
+    path.push({
+      lon: lon2 * 180 / Math.PI,
+      lat: lat2 * 180 / Math.PI,
+      alt_m: altM,
+    });
+  }
+  return path;
+}
+
+async function preflightAreaBackendChecks(payload) {
+  var altM = parseFloat(payload.max_altitude_m) || 120;
+  if (payload.area_kind === 'circle') {
+    await fetchPointCheck(payload.center_lon, payload.center_lat, altM);
+  }
+  var routePath = buildRoutePathForArea(payload, altM);
+  if (routePath.length >= 2) {
+    await fetchRouteCheck(routePath);
   }
 }
 
@@ -1750,10 +1870,10 @@ function undoPolygonPoint() {
   updateFpPolygon();
 }
 
-function onMapClickFP(e) {
+async function onMapClickFP(e) {
   if (!fpAreaPickMode) return;
   if (fpAreaPickMode === 'circle') {
-    if (!setCircleCenter(e.latlng.lat, e.latlng.lng, true, true)) {
+    if (!await setCircleCenter(e.latlng.lat, e.latlng.lng, true, true)) {
       return;
     }
     fpAreaPickMode = null;
@@ -1790,7 +1910,6 @@ function getCurrentAreaPayload() {
     };
   }
 
-  syncCircleFromInputs();
   if (!fpCentre) {
     throw new Error('Set the circular area centre first.');
   }
@@ -1804,8 +1923,10 @@ function getCurrentAreaPayload() {
 
 async function checkFpArea() {
   try {
+    await ensureCircleSelection();
     var payload = getCurrentAreaPayload();
     payload.max_altitude_m = parseFloat(document.getElementById('fpAlt').value) || 120;
+    await preflightAreaBackendChecks(payload);
     document.getElementById('fpCheckBtn').textContent = 'Checking...';
     const res = await fetch('/api/flight-plans/assess', {
       method: 'POST',
@@ -1861,7 +1982,8 @@ function showRiskResults(data) {
   }
 }
 
-function collectFlightPlanPayload() {
+async function collectFlightPlanPayload() {
+  await ensureCircleSelection();
   var payload = getCurrentAreaPayload();
   payload.operator_name = document.getElementById('fp_operator').value;
   payload.operator_contact = document.getElementById('fp_address').value;
@@ -1887,12 +2009,13 @@ function collectFlightPlanPayload() {
   payload.selected_twr = document.getElementById('fpTwr').value;
   payload.timezone = 'Europe/Bucharest';
   payload.created_from_app = 'visualise_zones_web';
+  await preflightAreaBackendChecks(payload);
   return payload;
 }
 
 async function saveFlightPlan() {
   try {
-    var payload = collectFlightPlanPayload();
+    var payload = await collectFlightPlanPayload();
     var saveBtn = document.getElementById('fpSaveBtn');
     if (saveBtn) saveBtn.textContent = 'Saving...';
     const res = await fetch('/api/flight-plans', {
@@ -2289,23 +2412,24 @@ def feature_contains(feat: dict, lon: float, lat: float, alt_m: float) -> bool:
 
 
 def do_crosscheck(lon: float, lat: float, alt_m: float) -> dict:
-    """Run cross-check across all loaded GeoJSON files."""
-    results = {}
-    for key, path in LAYER_FILES.items():
-        if not path.exists():
-            continue
-        data = json.loads(path.read_text())
-        hits = []
-        for feat in data.get("features", []):
-            if feature_contains(feat, lon, lat, alt_m):
-                hits.append(feat["properties"])
-        if hits:
-            results[key] = hits
-    return results
+    """Run point cross-check against the PostGIS-backed airspace backend."""
+    if _crosscheck_point is None:
+        raise RuntimeError("Airspace assessment backend is not available")
+    return _crosscheck_point(lon, lat, alt_m)
 
 
 def _utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _json_default(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
+def _json_bytes(payload, *, ensure_ascii: bool = False) -> bytes:
+    return json.dumps(payload, ensure_ascii=ensure_ascii, default=_json_default).encode("utf-8")
 
 
 def _decode_jwt_payload(token: str) -> dict:
@@ -2433,7 +2557,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(
                 200,
                 "application/json; charset=utf-8",
-                json.dumps({"accounts": _list_logged_accounts()}).encode(),
+                _json_bytes({"accounts": _list_logged_accounts()}),
             )
 
         elif path == "/api/auth/me":
@@ -2441,17 +2565,33 @@ class Handler(BaseHTTPRequestHandler):
             self._send(
                 200,
                 "application/json; charset=utf-8",
-                json.dumps({"user": user}).encode(),
+                _json_bytes({"user": user}),
             )
 
         elif path == "/healthz":
             self._send(200, "application/json; charset=utf-8", b'{"ok": true}')
 
+        elif path == "/airspace/check-point":
+            try:
+                if _check_point is None:
+                    raise RuntimeError("Airspace backend is not available")
+                lon = float(qs.get("lon", [0])[0])
+                lat = float(qs.get("lat", [0])[0])
+                alt = float(qs.get("alt_m", [120])[0])
+                result = _check_point(lon, lat, alt)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(result, ensure_ascii=False),
+                )
+            except Exception as exc:
+                self._send(503, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+
         elif path == "/api/flight-plans/options":
             self._send(
                 200,
                 "application/json; charset=utf-8",
-                json.dumps({"twr_options": FLIGHT_PLANS_MODULE.twr_options()}, ensure_ascii=False).encode(),
+                _json_bytes({"twr_options": FLIGHT_PLANS_MODULE.twr_options()}, ensure_ascii=False),
             )
 
         elif path == "/api/flight-plans":
@@ -2470,12 +2610,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     200,
                     "application/json; charset=utf-8",
-                    json.dumps({"flight_plans": plans}, ensure_ascii=False).encode(),
+                    _json_bytes({"flight_plans": plans}, ensure_ascii=False),
                 )
             except PermissionError as exc:
-                self._send(401, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except Exception as exc:
-                self._send(500, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path.startswith("/api/flight-plans/") and path.endswith("/pdf"):
             public_id = path[len("/api/flight-plans/"):-len("/pdf")].strip("/")
@@ -2496,7 +2636,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(pdf_bytes)
             except Exception as exc:
-                self._send(500, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/crosscheck":
             try:
@@ -2504,9 +2644,9 @@ class Handler(BaseHTTPRequestHandler):
                 lat = float(qs.get("lat", [0])[0])
                 alt = float(qs.get("alt", [120])[0])
                 result = do_crosscheck(lon, lat, alt)
-                self._send(200, "application/json; charset=utf-8", json.dumps(result).encode())
+                self._send(200, "application/json; charset=utf-8", _json_bytes(result))
             except Exception as exc:
-                self._send(500, "application/json", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/area_check":
             try:
@@ -2520,10 +2660,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     200,
                     "application/json; charset=utf-8",
-                    json.dumps(result, ensure_ascii=False).encode(),
+                    _json_bytes(result, ensure_ascii=False),
                 )
             except Exception as exc:
-                self._send(500, "application/json", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json", _json_bytes({"error": str(exc)}))
 
         elif path.startswith("/api/"):
             layer_key = path[len("/api/"):].rstrip("/")
@@ -2534,7 +2674,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     404,
                     "application/json",
-                    json.dumps({"error": f"Layer '{layer_key}' not found"}).encode(),
+                    _json_bytes({"error": f"Layer '{layer_key}' not found"}),
                 )
 
         else:
@@ -2572,11 +2712,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     200,
                     "application/json; charset=utf-8",
-                    json.dumps({"ok": True, "user": result["user"]}).encode(),
+                    _json_bytes({"ok": True, "user": result["user"]}),
                     extra_headers={"Set-Cookie": result["set_cookie"]},
                 )
             except Exception as exc:
-                self._send(400, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/auth/logout":
             self._send(
@@ -2593,10 +2733,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     200,
                     "application/json; charset=utf-8",
-                    json.dumps(result, ensure_ascii=False).encode(),
+                    _json_bytes(result, ensure_ascii=False),
                 )
             except Exception as exc:
-                self._send(400, "application/json", json.dumps({"error": str(exc)}).encode())
+                self._send(400, "application/json", _json_bytes({"error": str(exc)}))
+
+        elif path == "/airspace/check-route":
+            try:
+                if _check_route is None:
+                    raise RuntimeError("Airspace backend is not available")
+                data = json.loads(raw)
+                path_points = data.get("path") or []
+                result = _check_route(path_points)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(result, ensure_ascii=False),
+                )
+            except Exception as exc:
+                self._send(400, "application/json", _json_bytes({"error": str(exc)}))
 
         elif path.startswith("/api/flight-plans/") and path.endswith("/cancel"):
             public_id = path[len("/api/flight-plans/"):-len("/cancel")].strip("/")
@@ -2606,14 +2761,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     200,
                     "application/json; charset=utf-8",
-                    json.dumps({"ok": True, "flight_plan": cancelled}, ensure_ascii=False).encode(),
+                    _json_bytes({"ok": True, "flight_plan": cancelled}, ensure_ascii=False),
                 )
             except PermissionError as exc:
-                self._send(401, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except ValueError as exc:
-                self._send(400, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except Exception as exc:
-                self._send(500, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/flight-plans":
             try:
@@ -2623,16 +2778,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     201,
                     "application/json; charset=utf-8",
-                    json.dumps({"flight_plan": plan}, ensure_ascii=False).encode(),
+                    _json_bytes({"flight_plan": plan}, ensure_ascii=False),
                 )
             except PermissionError as exc:
-                self._send(401, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except _flight_plan_error as exc:
-                self._send(400, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except FlightPlanRepositoryError as exc:
-                self._send(500, "application/json; charset=utf-8", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except Exception as exc:
-                self._send(500, "application/json", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/generate_pdf":
             try:
@@ -2689,7 +2844,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(pdf_bytes)
             except Exception as exc:
-                self._send(500, "application/json", json.dumps({"error": str(exc)}).encode())
+                self._send(500, "application/json", _json_bytes({"error": str(exc)}))
         else:
             self._send(404, "text/plain", b"Not found")
 

@@ -108,6 +108,10 @@ Start server:
   - `GET /airspace/zones/near?lat=46.77&lon=23.59&radius_km=10`
   - `GET /airspace/check-point?lat=46.77&lon=23.59&alt_m=120`
   - `POST /airspace/check-route`
+- The browser flight-plan flow now uses the PostGIS-backed airspace checks for:
+  - circle centre blocking
+  - flight-area prechecks
+  - `/api/crosscheck`
 - Architecture notes: `docs/airspace-backend.md`
 
 ## DigitalOcean
