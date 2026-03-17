@@ -53,6 +53,8 @@ from modules.auth.module import build_auth_module
 from backend.airspace.ingestion.pipeline import SOURCES as AIRSPACE_INGESTION_SOURCES
 from backend.airspace.repositories.admin_repository import AirspaceAdminRepository
 from backend.airspace.services.admin_overview_service import AirspaceAdminOverviewService
+from backend.drone_tracking.repositories.drone_tracking_repository import DroneTrackingRepository
+from backend.drone_tracking.services.mock_telemetry_service import DroneMockTelemetryService
 from backend.airspace.services.airspace_query_service import (
     build_airspace_query_service,
     normalize_categories as _normalize_airspace_categories,
@@ -123,6 +125,12 @@ AIRSPACE_ADMIN_OVERVIEW_SERVICE = AirspaceAdminOverviewService(
     admin_repo=AIRSPACE_ADMIN_REPO,
     sources=AIRSPACE_INGESTION_SOURCES,
 )
+DRONE_TRACKING_REPO = DroneTrackingRepository()
+DRONE_MOCK_TELEMETRY_SERVICE = DroneMockTelemetryService(DRONE_TRACKING_REPO)
+MOCK_DRONE_ENABLED = os.environ.get("DRONE_ENABLE_MOCK_TELEMETRY", "1").strip().lower() not in {"0", "false", "no"}
+MOCK_DRONE_INTERVAL_SECONDS = max(1.0, float(os.environ.get("DRONE_MOCK_TELEMETRY_INTERVAL", "3")))
+_mock_drone_stop = threading.Event()
+_mock_drone_thread: threading.Thread | None = None
 
 LAYER_FILES = {
     "uas_zones":    ASSET_DIR / "restriction_zones.geojson",
@@ -321,6 +329,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset=\"UTF-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
   <title>Drone Backend - Admin</title>
+  <link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\"/>
+  <script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>
   <style>
     :root {
       --bg: #0f141c;
@@ -341,7 +351,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     .toolbar h1 { margin: 0 0 6px 0; font-size: 28px; }
     .muted { color: var(--muted); }
     .links a { color: var(--accent); text-decoration: none; margin-left: 12px; }
-    .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
     .summary-card { background: linear-gradient(180deg, #1a2230 0%, #141b26 100%); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
     .summary-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
     .summary-card .value { font-size: 28px; font-weight: 700; }
@@ -363,9 +373,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     .badge.info, .badge.planned { background: rgba(88, 166, 255, .18); color: #85c1ff; }
     .stack { display: flex; flex-direction: column; gap: 4px; }
     .small { font-size: 12px; color: var(--muted); }
-    .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    .bottom-grid { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 14px; margin-top: 14px; }
     .mono { font-family: monospace; word-break: break-all; }
     a { color: var(--accent); }
+    .drone-map { height: 260px; border-top: 1px solid var(--line); }
+    .drone-table { max-height: 280px; overflow: auto; border-top: 1px solid var(--line); }
     @media (max-width: 1280px) {
       .panel-grid, .summary-grid, .bottom-grid { grid-template-columns: 1fr; }
       .table-wrap { max-height: none; }
@@ -407,6 +419,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class=\"label\">Recent Ingestion Issues</div>
         <div class=\"value\" id=\"summaryIssues\">0</div>
         <div class=\"sub\" id=\"summaryIssuesSub\">No recent issues</div>
+      </div>
+      <div class=\"summary-card\">
+        <div class=\"label\">Live Drones</div>
+        <div class=\"value\" id=\"summaryLiveDrones\">0</div>
+        <div class=\"sub\" id=\"summaryLiveDronesSub\">No active drone telemetry</div>
       </div>
     </div>
 
@@ -513,10 +530,34 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           </table>
         </div>
       </section>
+
+      <section class=\"panel\">
+        <div class=\"head\">
+          <h2>Live Drones</h2>
+          <div class=\"muted\" id=\"liveDronesCaption\">Currently flying drones tied to active flight plans.</div>
+        </div>
+        <div id=\"adminDroneMap\" class=\"drone-map\"></div>
+        <div class=\"drone-table\">
+          <table>
+            <thead>
+              <tr>
+                <th>Drone</th>
+                <th>Flight Plan</th>
+                <th>Position</th>
+                <th>Telemetry</th>
+              </tr>
+            </thead>
+            <tbody id=\"liveDroneRows\"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </div>
 
   <script>
+    let adminDroneMap = null;
+    let adminDroneLayer = null;
+
     function formatValue(value, fallback) {
       return value == null || value === '' ? (fallback || '-') : value;
     }
@@ -617,6 +658,86 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }).join('');
     }
 
+    function ensureAdminDroneMap() {
+      if (adminDroneMap) return;
+      adminDroneMap = L.map('adminDroneMap', { zoomControl: true }).setView([45.9, 25.0], 6);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap',
+        maxZoom: 19,
+      }).addTo(adminDroneMap);
+      adminDroneLayer = L.layerGroup().addTo(adminDroneMap);
+    }
+
+    function droneBadgeClass(status) {
+      const normalized = String(status || 'unknown').toLowerCase();
+      if (normalized === 'flying') return 'ok';
+      if (normalized === 'ready') return 'warn';
+      return 'info';
+    }
+
+    function renderLiveDrones(drones) {
+      ensureAdminDroneMap();
+      document.getElementById('summaryLiveDrones').textContent = String(drones.length);
+      document.getElementById('summaryLiveDronesSub').textContent =
+        drones.length ? `Latest ping ${formatValue(drones[0].timestamp)}` : 'No active drone telemetry';
+      document.getElementById('liveDronesCaption').textContent =
+        `${drones.length} drone${drones.length === 1 ? '' : 's'} currently tied to active flight plans`;
+
+      const rows = document.getElementById('liveDroneRows');
+      if (!drones.length) {
+        renderEmpty(rows, 4, 'No live drones currently flying.');
+      } else {
+        rows.innerHTML = drones.map(function(drone) {
+          return `
+            <tr>
+              <td class=\"stack\">
+                <strong>${formatValue(drone.drone_id)}</strong>
+                <span class=\"small\">${formatValue(drone.label)}</span>
+                <span>${badge(formatValue(drone.status, 'unknown'), droneBadgeClass(drone.status))}</span>
+              </td>
+              <td class=\"stack\">
+                <span>${formatValue(drone.flight_plan_public_id)}</span>
+                <span class=\"small\">${formatValue(drone.location_name)}</span>
+              </td>
+              <td class=\"stack\">
+                <span>${Number(drone.latitude || 0).toFixed(5)}, ${Number(drone.longitude || 0).toFixed(5)}</span>
+                <span class=\"small\">Alt ${Number(drone.altitude || 0).toFixed(1)} m</span>
+              </td>
+              <td class=\"stack\">
+                <span>SPD ${Number(drone.speed || 0).toFixed(1)} m/s | BAT ${Number(drone.battery_level || 0).toFixed(0)}%</span>
+                <span class=\"small\">HDG ${Number(drone.heading || 0).toFixed(0)} | ${formatValue(drone.timestamp)}</span>
+              </td>
+            </tr>
+          `;
+        }).join('');
+      }
+
+      adminDroneLayer.clearLayers();
+      if (!drones.length) return;
+
+      const bounds = [];
+      drones.forEach(function(drone) {
+        const lat = Number(drone.latitude);
+        const lon = Number(drone.longitude);
+        const heading = Number(drone.heading || 0).toFixed(0);
+        const icon = L.divIcon({
+          className: 'admin-drone-marker',
+          html: `<div style=\"background:#58a6ff;color:#071018;border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:4px 8px;font-size:11px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.35)\">${drone.drone_id || 'DRONE'} | ${heading}&deg;</div>`,
+          iconSize: [130, 28],
+          iconAnchor: [65, 14],
+        });
+        L.marker([lat, lon], { icon: icon })
+          .bindPopup(`<strong>${drone.drone_id || ''}</strong><br/>${formatValue(drone.location_name)}<br/>Alt ${Number(drone.altitude || 0).toFixed(1)} m<br/>Battery ${Number(drone.battery_level || 0).toFixed(0)}%`)
+          .addTo(adminDroneLayer);
+        bounds.push([lat, lon]);
+      });
+      if (bounds.length === 1) {
+        adminDroneMap.setView(bounds[0], 13);
+      } else {
+        adminDroneMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 14 });
+      }
+    }
+
     function renderAirspace(airspace) {
       const sources = airspace.sources || [];
       const versions = airspace.active_versions || [];
@@ -708,6 +829,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       renderAccounts(data.accounts || []);
       renderFlightPlans(data.flight_plans || []);
       renderAirspace(data.airspace || {});
+      renderLiveDrones(data.live_drones || []);
       document.getElementById('refreshLabel').textContent =
         `Auto-refresh every 10 seconds | Last refresh ${new Date().toLocaleTimeString()}`;
     }
@@ -1019,6 +1141,29 @@ HTML = b"""<!DOCTYPE html>
   .saved-plan-card .saved-title { font-weight: 700; color: var(--blue); margin-bottom: 6px; }
   .saved-plan-card .saved-row { padding: 2px 0; color: var(--text); }
   .saved-plan-card .saved-row span { color: var(--muted); margin-right: 6px; }
+  .drone-card {
+    border: 1px solid var(--border); border-radius: 10px; background: rgba(88,166,255,.08);
+    padding: 12px; margin-bottom: 10px; font-size: .8rem;
+  }
+  .drone-card .drone-top {
+    display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;
+  }
+  .drone-card .drone-id { font-weight:700; color: var(--blue); }
+  .drone-card .drone-status {
+    font-size:.68rem; padding:3px 8px; border-radius:999px; text-transform:uppercase; font-weight:700;
+    background: rgba(35,134,54,.18); color:#8ae1a7;
+  }
+  .drone-card .drone-status.ready { background: rgba(210,153,34,.16); color:#ffd48a; }
+  .drone-card .drone-status.offline { background: rgba(218,54,51,.16); color:#ff9893; }
+  .drone-card .drone-grid {
+    display:grid; grid-template-columns: 1fr 1fr; gap:6px 10px; color:var(--text);
+  }
+  .drone-card .drone-grid span { color: var(--muted); display:block; font-size:.68rem; margin-bottom:1px; }
+  .drone-card .drone-actions { display:flex; gap:8px; margin-top:10px; }
+  .drone-card .drone-actions button {
+    flex:1; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); padding:8px 10px; cursor:pointer;
+  }
+  .drone-card .drone-actions button:hover { border-color: var(--accent); }
   .draw-hint {
     background: rgba(233,69,96,.12); border: 1px dashed var(--accent);
     border-radius:8px; padding:10px 12px; font-size:.8rem;
@@ -1094,6 +1239,14 @@ HTML = b"""<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="sb-section">
+    <h2>Live Drone</h2>
+    <button class="fp-launch-btn fp-secondary-btn" onclick="loadMyDrones(true)">Refresh My Drone</button>
+    <div class="my-plans-list" id="myDroneList">
+      <div class="muted">Sign in to load your live drone telemetry.</div>
+    </div>
+  </div>
+
   <div id="stats">Loading layers...</div>
 </div>
 
@@ -1129,10 +1282,17 @@ let rawData   = {};
 let allFeatureIndex = [];
 let layersLoaded = false;
 let authenticatedUser = null;
+let myDroneRefreshTimer = null;
+let latestMyDrones = [];
+let myDroneLayer = null;
 const CENTER_BLOCKING_LAYER_KEYS = ['ctr', 'uas_zones', 'notam', 'tma'];
 
 function setMyPlansContent(html) {
   document.getElementById('myPlansList').innerHTML = html;
+}
+
+function setMyDronesContent(html) {
+  document.getElementById('myDroneList').innerHTML = html;
 }
 
 function canCancelPlan(plan) {
@@ -1181,6 +1341,84 @@ function renderMyFlightPlans(plans) {
   setMyPlansContent(html);
 }
 
+function ensureMyDroneLayer() {
+  if (!myDroneLayer) {
+    myDroneLayer = L.layerGroup().addTo(map);
+  }
+}
+
+function droneMarkerIcon(drone) {
+  var heading = Math.round(Number(drone.heading || 0));
+  return L.divIcon({
+    className: 'my-drone-marker',
+    html:
+      '<div style="background:#58a6ff;color:#071018;border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:5px 9px;font-size:11px;font-weight:700;box-shadow:0 5px 14px rgba(0,0,0,.35)">' +
+      (drone.drone_id || 'DRONE') + ' | ' + heading + '&deg;' +
+      '</div>',
+    iconSize: [132, 28],
+    iconAnchor: [66, 14],
+  });
+}
+
+function focusDrone(droneId) {
+  var drone = latestMyDrones.find(function(item) { return item.drone_id === droneId; });
+  if (!drone) return;
+  map.setView([Number(drone.latitude), Number(drone.longitude)], 15);
+}
+
+function renderMyDrones(drones) {
+  latestMyDrones = drones || [];
+  ensureMyDroneLayer();
+  myDroneLayer.clearLayers();
+
+  if (!authenticatedUser) {
+    setMyDronesContent('<div class="muted">Sign in to load your live drone telemetry.</div>');
+    return;
+  }
+  if (!drones || !drones.length) {
+    setMyDronesContent('<div class="muted">No active or upcoming drone telemetry for your flight plans yet.</div>');
+    return;
+  }
+
+  drones.forEach(function(drone) {
+    var lat = Number(drone.latitude);
+    var lon = Number(drone.longitude);
+    var marker = L.marker([lat, lon], { icon: droneMarkerIcon(drone) });
+    marker.bindPopup(
+      '<strong>' + (drone.drone_id || '') + '</strong><br/>' +
+      (drone.location_name || '') + '<br/>' +
+      'Alt ' + Number(drone.altitude || 0).toFixed(1) + ' m | BAT ' + Number(drone.battery_level || 0).toFixed(0) + '%'
+    );
+    marker.addTo(myDroneLayer);
+  });
+
+  var html = drones.map(function(drone) {
+    var statusClass = String(drone.status || 'offline').toLowerCase();
+    return (
+      '<div class="drone-card">' +
+        '<div class="drone-top">' +
+          '<div class="drone-id">' + (drone.drone_id || '') + '</div>' +
+          '<div class="drone-status ' + statusClass + '">' + (drone.status || 'unknown') + '</div>' +
+        '</div>' +
+        '<div class="drone-grid">' +
+          '<div><span>Flight plan</span>' + (drone.flight_plan_public_id || '') + '</div>' +
+          '<div><span>Updated</span>' + (drone.timestamp || '') + '</div>' +
+          '<div><span>Altitude</span>' + Number(drone.altitude || 0).toFixed(1) + ' m</div>' +
+          '<div><span>Battery</span>' + Number(drone.battery_level || 0).toFixed(0) + '%</div>' +
+          '<div><span>Speed</span>' + Number(drone.speed || 0).toFixed(1) + ' m/s</div>' +
+          '<div><span>Heading</span>' + Number(drone.heading || 0).toFixed(0) + '&deg;</div>' +
+          '<div><span>Pitch / Roll</span>' + Number(drone.pitch || 0).toFixed(1) + '&deg; / ' + Number(drone.roll || 0).toFixed(1) + '&deg;</div>' +
+          '<div><span>Position</span>' + Number(drone.latitude || 0).toFixed(5) + ', ' + Number(drone.longitude || 0).toFixed(5) + '</div>' +
+        '</div>' +
+        '<div class="drone-actions">' +
+          '<button type="button" onclick="focusDrone(\\'' + (drone.drone_id || '') + '\\')">Focus on map</button>' +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+  setMyDronesContent(html);
+}
+
 async function loadMyFlightPlans(showErrors) {
   if (!authenticatedUser) {
     renderMyFlightPlans([]);
@@ -1200,6 +1438,45 @@ async function loadMyFlightPlans(showErrors) {
     } else {
       console.error(err);
     }
+  }
+}
+
+async function loadMyDrones(showErrors) {
+  if (!authenticatedUser) {
+    renderMyDrones([]);
+    return;
+  }
+  try {
+    const res = await fetch('/api/drones/live');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to load live drone telemetry.');
+    }
+    const data = await res.json();
+    renderMyDrones(data.drones || []);
+  } catch (err) {
+    if (showErrors) {
+      alert(err && err.message ? err.message : 'Failed to load live drone telemetry.');
+    } else {
+      console.error(err);
+    }
+  }
+}
+
+function startMyDroneRefresh() {
+  clearInterval(myDroneRefreshTimer);
+  loadMyDrones(false);
+  myDroneRefreshTimer = setInterval(function() {
+    loadMyDrones(false);
+  }, 4000);
+}
+
+function stopMyDroneRefresh() {
+  clearInterval(myDroneRefreshTimer);
+  myDroneRefreshTimer = null;
+  latestMyDrones = [];
+  if (myDroneLayer) {
+    myDroneLayer.clearLayers();
   }
 }
 
@@ -1271,6 +1548,7 @@ function unlockAuthenticatedUi(user) {
     loadAllLayers();
   }
   loadMyFlightPlans(false);
+  startMyDroneRefresh();
   prefillFlightPlanForm();
 }
 
@@ -1280,6 +1558,8 @@ function showAuthGate(message) {
   setAuthError(message || '');
   document.getElementById('authGate').style.display = 'flex';
   renderMyFlightPlans([]);
+  stopMyDroneRefresh();
+  renderMyDrones([]);
 }
 
 function decodeJwtPayload(token) {
@@ -3054,7 +3334,46 @@ def _build_admin_overview_response() -> dict:
         "accounts": accounts,
         "flight_plans": flight_plans,
         "airspace": AIRSPACE_ADMIN_OVERVIEW_SERVICE.overview(),
+        "live_drones": _list_live_drones_for_admin(),
     }
+
+
+def _list_live_drones_for_user(owner_email: str) -> list[dict]:
+    return DRONE_TRACKING_REPO.list_live_drones(
+        owner_email=owner_email,
+        include_upcoming=True,
+        only_ongoing=False,
+    )
+
+
+def _list_live_drones_for_admin() -> list[dict]:
+    return DRONE_TRACKING_REPO.list_live_drones(
+        owner_email=None,
+        include_upcoming=False,
+        only_ongoing=True,
+    )
+
+
+def _run_mock_drone_loop(stop_event: threading.Event):
+    while not stop_event.is_set():
+        try:
+            DRONE_MOCK_TELEMETRY_SERVICE.generate_tick()
+        except Exception as exc:
+            print(f"  Mock drone telemetry tick failed: {exc}")
+        stop_event.wait(MOCK_DRONE_INTERVAL_SECONDS)
+
+
+def _start_mock_drone_loop():
+    global _mock_drone_thread
+    if not MOCK_DRONE_ENABLED or _mock_drone_thread is not None:
+        return
+    _mock_drone_thread = threading.Thread(
+        target=_run_mock_drone_loop,
+        args=(_mock_drone_stop,),
+        name="mock-drone-telemetry",
+        daemon=True,
+    )
+    _mock_drone_thread.start()
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -3105,6 +3424,13 @@ class Handler(BaseHTTPRequestHandler):
                 _json_bytes(_build_admin_overview_response()),
             )
 
+        elif path == "/api/admin/drones/live":
+            self._send(
+                200,
+                "application/json; charset=utf-8",
+                _json_bytes({"drones": _list_live_drones_for_admin()}),
+            )
+
         elif path == "/api/auth/me":
             user = _safe_session_user(self.headers)
             self._send(
@@ -3112,6 +3438,17 @@ class Handler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
                 _json_bytes({"user": user}),
             )
+
+        elif path == "/api/drones/live":
+            try:
+                user = _require_session_user(self.headers)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"drones": _list_live_drones_for_user(user["email"])}),
+                )
+            except PermissionError as exc:
+                self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/healthz":
             self._send(200, "application/json; charset=utf-8", b'{"ok": true}')
@@ -3452,9 +3789,12 @@ def main():
     print(f"  Admin dashboard: {url}/admin")
     print(f"  Logged accounts: {url}/admin/logged-accounts")
     print(f"  Flight plans: {url}/admin/flight-plans")
+    if MOCK_DRONE_ENABLED:
+        print(f"  Mock drone telemetry: enabled ({MOCK_DRONE_INTERVAL_SECONDS:.0f}s interval)")
     print("  Press Ctrl-C to stop.\n")
 
     server = HTTPServer((args.host, args.port), Handler)
+    _start_mock_drone_loop()
 
     if not args.no_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
@@ -3463,6 +3803,8 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n  Server stopped.")
+    finally:
+        _mock_drone_stop.set()
 
 
 if __name__ == "__main__":

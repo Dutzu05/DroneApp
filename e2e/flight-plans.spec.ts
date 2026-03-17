@@ -4,9 +4,16 @@ function uniqueEmail(prefix: string): string {
   return `${prefix}-${Date.now()}@example.com`;
 }
 
+function tomorrowLocalDateString(): string {
+  const now = new Date();
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  return tomorrow.toISOString().slice(0, 10);
+}
+
 test.describe('Critical Flight Plan Journeys', () => {
   test('@compose user can log in through backend session, create a polygon flight plan, and cancel it', async ({ page }) => {
     const email = uniqueEmail('playwright-e2e');
+    const flightDate = tomorrowLocalDateString();
 
     await page.goto('/');
     await expect(page.locator('#authGate')).toBeVisible();
@@ -58,8 +65,8 @@ test.describe('Critical Flight Plan Journeys', () => {
     await page.locator('#fp_pphone').fill('0711111111');
     await page.locator('#fp_purpose').fill('Playwright E2E flow');
     await page.locator('#fp_loc').fill('Bucharest Playwright Zone');
-    await page.locator('#fp_date1').fill('2026-03-17');
-    await page.locator('#fp_date2').fill('2026-03-17');
+    await page.locator('#fp_date1').fill(flightDate);
+    await page.locator('#fp_date2').fill(flightDate);
     await page.locator('#fp_time1').fill('09:00');
     await page.locator('#fp_time2').fill('10:00');
 

@@ -28,6 +28,7 @@ trap cleanup EXIT
 base_url="${E2E_BASE_URL:-http://127.0.0.1:${DRONE_APP_PORT}}"
 ./scripts/wait-for-http.sh "${base_url%/}/healthz" 90 2
 AIRSPACE_SMOKE_BASE_URL="$base_url" CONTAINER_CLI="$container_cli" ./scripts/run-airspace-compose-smoke.sh
+DRONE_TELEMETRY_SMOKE_BASE_URL="$base_url" CONTAINER_CLI="$container_cli" ./scripts/run-drone-telemetry-compose-smoke.sh
 npm ci
 npx playwright install chromium
 E2E_BASE_URL="$base_url" npx playwright test --grep @compose

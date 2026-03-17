@@ -34,6 +34,7 @@ fi
 
 "$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/restriction_zones_schema.sql"
 "$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/flight_plans_schema.sql"
+"$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/drone_tracking_schema.sql"
 if "$PSQL_BIN" -d "$DB_NAME" -tAc "SELECT 1 FROM pg_available_extensions WHERE name='postgis'" | grep -q 1; then
   "$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/airspace_schema.sql"
 else

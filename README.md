@@ -130,6 +130,8 @@ Start server:
   - `./scripts/run-unit-tests.sh`
 - PostGIS ingestion smoke:
   - `./scripts/run-airspace-compose-smoke.sh`
+- Drone telemetry compose smoke:
+  - `./scripts/run-drone-telemetry-compose-smoke.sh`
 - HTTP airspace smoke for staging/production:
   - `AIRSPACE_SMOKE_BASE_URL=https://staging.example.com ./scripts/run-airspace-http-smoke.sh`
 - Pre-commit hook setup:
@@ -149,6 +151,7 @@ Start server:
 - Local Docker E2E:
   - `./scripts/run-e2e-compose.sh`
   - includes real airspace ingestion smoke against PostGIS before Playwright
+  - includes mock drone telemetry smoke before Playwright
 - Staging E2E:
   - `E2E_BASE_URL=https://staging.example.com ./scripts/run-e2e-staging.sh`
   - includes HTTP airspace smoke before Playwright
