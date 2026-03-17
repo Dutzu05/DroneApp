@@ -18,6 +18,24 @@ def _runtime_state_sql(alias: str = 'fp') -> str:
 
 
 class DroneTrackingRepository:
+    def get_live_drone(
+        self,
+        drone_id: str,
+        *,
+        owner_email: str | None = None,
+        include_upcoming: bool = False,
+        only_ongoing: bool = False,
+    ) -> dict[str, Any] | None:
+        drones = self.list_live_drones(
+            owner_email=owner_email,
+            include_upcoming=include_upcoming,
+            only_ongoing=only_ongoing,
+        )
+        for drone in drones:
+            if str(drone.get('drone_id') or '') == drone_id:
+                return drone
+        return None
+
     def list_mock_candidate_plans(self, *, include_upcoming: bool = True) -> list[dict[str, Any]]:
         runtime_state = _runtime_state_sql('fp')
         where = ["fp.workflow_status = 'planned'", "fp.scheduled_end_at >= NOW()"]
@@ -253,6 +271,34 @@ class DroneTrackingRepository:
                 params,
             )
             return list(cur.fetchall())
+
+    def telemetry_history(self, drone_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  drone_id,
+                  latitude,
+                  longitude,
+                  altitude,
+                  heading,
+                  pitch,
+                  roll,
+                  speed,
+                  telemetry_timestamp AS timestamp,
+                  battery_level,
+                  status,
+                  source
+                FROM drone_telemetry
+                WHERE drone_id = %s
+                ORDER BY telemetry_timestamp DESC
+                LIMIT %s
+                """,
+                (drone_id, limit),
+            )
+            rows = list(cur.fetchall())
+        rows.reverse()
+        return rows
 
     def count_live_drones(self, *, only_ongoing: bool = True) -> int:
         with get_connection() as conn, conn.cursor() as cur:

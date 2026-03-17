@@ -73,6 +73,20 @@ For local testing with this setup, add this as an Authorized JavaScript origin i
 Start server:
 - `.venv/bin/python scripts/visualise_zones.py --no-browser`
 
+## 3D Drone View
+- The 2D Leaflet map remains the primary interface.
+- A lazy-loaded Cesium 3D view can be opened from an active drone card with `3D view`.
+- The 3D scene is built from:
+  - the selected drone and its recent telemetry track
+  - nearby ongoing aircraft within `10 km`
+  - nearby airspace zones rendered as extruded blocks
+  - mock obstacles rendered around the focused drone
+- New backend endpoint:
+  - `GET /api/drones/<drone_id>/scene-3d`
+- Optional terrain relief token:
+  - env var `DRONE_CESIUM_ION_TOKEN`
+- If `DRONE_CESIUM_ION_TOKEN` is not set, 3D still works with an ellipsoid globe but without remote terrain relief.
+
 ## Backend Architecture
 - The backend is still a modular monolith, but auth and flight-plan orchestration now live under `modules/`
 - Architecture notes:

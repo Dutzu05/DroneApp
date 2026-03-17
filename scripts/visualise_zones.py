@@ -40,10 +40,11 @@ import time
 import sys
 import uuid
 import webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -55,6 +56,7 @@ from backend.airspace.repositories.admin_repository import AirspaceAdminReposito
 from backend.airspace.services.admin_overview_service import AirspaceAdminOverviewService
 from backend.drone_tracking.repositories.drone_tracking_repository import DroneTrackingRepository
 from backend.drone_tracking.services.mock_telemetry_service import DroneMockTelemetryService
+from backend.drone_tracking.services.scene_3d_service import Drone3DSceneService
 from backend.airspace.services.airspace_query_service import (
     build_airspace_query_service,
     normalize_categories as _normalize_airspace_categories,
@@ -119,6 +121,7 @@ GOOGLE_WEB_CLIENT_ID = os.environ.get(
     "DRONE_GOOGLE_WEB_CLIENT_ID",
     "1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com",
 )
+CESIUM_ION_TOKEN = os.environ.get("DRONE_CESIUM_ION_TOKEN", "").strip()
 AIRSPACE_QUERY_SERVICE = build_airspace_query_service()
 AIRSPACE_ADMIN_REPO = AirspaceAdminRepository()
 AIRSPACE_ADMIN_OVERVIEW_SERVICE = AirspaceAdminOverviewService(
@@ -127,6 +130,12 @@ AIRSPACE_ADMIN_OVERVIEW_SERVICE = AirspaceAdminOverviewService(
 )
 DRONE_TRACKING_REPO = DroneTrackingRepository()
 DRONE_MOCK_TELEMETRY_SERVICE = DroneMockTelemetryService(DRONE_TRACKING_REPO)
+DRONE_3D_SCENE_SERVICE = Drone3DSceneService(
+    drone_repo=DRONE_TRACKING_REPO,
+    airspace_query_service=AIRSPACE_QUERY_SERVICE,
+    cesium_ion_token=CESIUM_ION_TOKEN,
+)
+AUTO_DEMO_FLIGHT_PLAN_ENABLED = os.environ.get("DRONE_AUTO_DEMO_FLIGHT_PLAN", "1").strip().lower() not in {"0", "false", "no"}
 MOCK_DRONE_ENABLED = os.environ.get("DRONE_ENABLE_MOCK_TELEMETRY", "1").strip().lower() not in {"0", "false", "no"}
 MOCK_DRONE_INTERVAL_SECONDS = max(1.0, float(os.environ.get("DRONE_MOCK_TELEMETRY_INTERVAL", "3")))
 _mock_drone_stop = threading.Event()
@@ -1171,6 +1180,50 @@ HTML = b"""<!DOCTYPE html>
     background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.35);
     color: #ffd48a; font-size: .73rem; line-height: 1.45;
   }
+  #drone3dOverlay {
+    display: none; position: absolute; top: 0; left: var(--sidebar-w); right: 0; bottom: 0;
+    z-index: 2200; background: rgba(4, 7, 11, .78); backdrop-filter: blur(8px);
+  }
+  #drone3dShell {
+    position: absolute; inset: 18px; display: flex; flex-direction: column;
+    background: rgba(13,17,23,.96); border: 1px solid rgba(88,166,255,.18); border-radius: 18px;
+    box-shadow: 0 20px 80px rgba(0,0,0,.6); overflow: hidden;
+  }
+  .drone3d-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    padding: 16px 18px 12px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(88,166,255,.08), rgba(13,17,23,0));
+  }
+  .drone3d-head h2 { font-size: 1rem; color: #d7ecff; margin-bottom: 4px; }
+  .drone3d-head .sub { color: var(--muted); font-size: .77rem; line-height: 1.45; }
+  .drone3d-close {
+    border: 1px solid var(--border); border-radius: 999px; background: transparent;
+    color: var(--text); padding: 7px 12px; cursor: pointer; font-weight: 700;
+  }
+  .drone3d-close:hover { border-color: var(--accent); color: #fff; }
+  .drone3d-meta {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+    padding: 12px 18px; border-bottom: 1px solid var(--border); background: rgba(22,27,34,.88);
+  }
+  .drone3d-metric {
+    border: 1px solid var(--border); border-radius: 12px; background: rgba(13,17,23,.9);
+    padding: 10px 12px;
+  }
+  .drone3d-metric .label { color: var(--muted); font-size: .69rem; text-transform: uppercase; letter-spacing: .08em; }
+  .drone3d-metric .value { color: #f0f6fc; font-size: .92rem; font-weight: 700; margin-top: 4px; }
+  .drone3d-stage {
+    position: relative; flex: 1; min-height: 320px; background: #05070a;
+  }
+  #drone3dCanvas { position: absolute; inset: 0; }
+  .drone3d-status {
+    position: absolute; left: 18px; bottom: 18px; max-width: 360px;
+    padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(88,166,255,.24);
+    background: rgba(13,17,23,.82); color: var(--text); font-size: .77rem; line-height: 1.5;
+    box-shadow: 0 10px 24px rgba(0,0,0,.35);
+  }
+  .drone3d-status.warn { border-color: rgba(210,153,34,.45); color: #ffd48a; }
+  .drone3d-status.error { border-color: rgba(233,69,96,.45); color: #ffb4ab; }
+  .drone3d-status.ok { border-color: rgba(63,185,80,.45); color: #a7f3b7; }
   .draw-hint {
     background: rgba(233,69,96,.12); border: 1px dashed var(--accent);
     border-radius:8px; padding:10px 12px; font-size:.8rem;
@@ -1181,6 +1234,9 @@ HTML = b"""<!DOCTYPE html>
 
   @media (max-width: 1100px) {
     :root { --sidebar-w: 320px; }
+  }
+  @media (max-width: 860px) {
+    .drone3d-meta { grid-template-columns: 1fr 1fr; }
   }
 </style>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -1270,6 +1326,28 @@ HTML = b"""<!DOCTYPE html>
   <div id="crossResults"></div>
 </div>
 
+<div id="drone3dOverlay">
+  <div id="drone3dShell">
+    <div class="drone3d-head">
+      <div>
+        <h2>3D Drone View</h2>
+        <div class="sub" id="drone3dSubtitle">Lazy-loaded Cesium scene around the active drone. 2D map remains unchanged underneath.</div>
+      </div>
+      <button class="drone3d-close" type="button" onclick="closeDrone3D()">Close 3D</button>
+    </div>
+    <div class="drone3d-meta" id="drone3dMeta">
+      <div class="drone3d-metric"><div class="label">Drone</div><div class="value">-</div></div>
+      <div class="drone3d-metric"><div class="label">Terrain</div><div class="value">-</div></div>
+      <div class="drone3d-metric"><div class="label">Airspace Blocks</div><div class="value">-</div></div>
+      <div class="drone3d-metric"><div class="label">Nearby Aircraft</div><div class="value">-</div></div>
+    </div>
+    <div class="drone3d-stage">
+      <div id="drone3dCanvas"></div>
+      <div class="drone3d-status" id="drone3dStatus">Select an active drone to open a 3D view around it.</div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ========================================================================
 // CONFIG
@@ -1285,6 +1363,7 @@ const LAYERS_CFG = {
 };
 
 const GOOGLE_CLIENT_ID = '__GOOGLE_CLIENT_ID__';
+const CESIUM_ION_TOKEN = '__CESIUM_ION_TOKEN__';
 const TOWER_DATA = __TOWER_CONTACTS_JSON__;
 window._towerData = TOWER_DATA;
 
@@ -1294,10 +1373,14 @@ let rawData   = {};
 let allFeatureIndex = [];
 let layersLoaded = false;
 let authenticatedUser = null;
+let authWorkspaceRefreshPromise = null;
 let myDroneRefreshTimer = null;
 let latestMyDrones = [];
 let myDroneLayer = null;
 let myDroneMarkers = {};
+let drone3dViewer = null;
+let drone3dLoadPromise = null;
+let drone3dTerrainMode = '';
 const CENTER_BLOCKING_LAYER_KEYS = ['ctr', 'uas_zones', 'notam', 'tma'];
 
 function setMyPlansContent(html) {
@@ -1383,6 +1466,324 @@ function focusDrone(droneId) {
   }
 }
 
+function drone3dStatus(message, kind) {
+  var status = document.getElementById('drone3dStatus');
+  status.className = 'drone3d-status' + (kind ? ' ' + kind : '');
+  status.textContent = message;
+}
+
+function setDrone3DMeta(scene) {
+  var metrics = [
+    { label: 'Drone', value: (scene.drone && scene.drone.drone_id) || '-' },
+    { label: 'Terrain', value: scene.scene && scene.scene.terrain && scene.scene.terrain.provider ? scene.scene.terrain.provider : '-' },
+    { label: 'Airspace Blocks', value: String((scene.zones || []).length) },
+    { label: 'Nearby Aircraft', value: String((scene.nearby_aircraft || []).length) },
+  ];
+  document.getElementById('drone3dMeta').innerHTML = metrics.map(function(item) {
+    return '<div class="drone3d-metric"><div class="label">' + item.label + '</div><div class="value">' + item.value + '</div></div>';
+  }).join('');
+}
+
+function closeDrone3D() {
+  document.getElementById('drone3dOverlay').style.display = 'none';
+}
+
+function loadScriptOnce(src) {
+  return new Promise(function(resolve, reject) {
+    var existing = Array.from(document.querySelectorAll('script')).find(function(node) { return node.src === src; });
+    if (existing) {
+      if (window.Cesium) {
+        resolve();
+        return;
+      }
+      existing.addEventListener('load', function() { resolve(); }, { once: true });
+      existing.addEventListener('error', function(err) { reject(err); }, { once: true });
+      return;
+    }
+    var script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.onload = function() { resolve(); };
+    script.onerror = function(err) { reject(err); };
+    document.head.appendChild(script);
+  });
+}
+
+function loadCssOnce(id, href) {
+  if (document.getElementById(id)) return;
+  var link = document.createElement('link');
+  link.id = id;
+  link.rel = 'stylesheet';
+  link.href = href;
+  document.head.appendChild(link);
+}
+
+async function ensureCesiumLoaded() {
+  if (window.Cesium) return window.Cesium;
+  if (drone3dLoadPromise) return drone3dLoadPromise;
+  drone3dLoadPromise = (async function() {
+    var base = 'https://cesium.com/downloads/cesiumjs/releases/1.126/Build/Cesium';
+    loadCssOnce('cesiumWidgetCss', base + '/Widgets/widgets.css');
+    await loadScriptOnce(base + '/Cesium.js');
+    return window.Cesium;
+  })();
+  try {
+    return await drone3dLoadPromise;
+  } finally {
+    drone3dLoadPromise = null;
+  }
+}
+
+function polygonHierarchyFromRings(Cesium, rings, baseHeight) {
+  if (!rings || !rings.length) return null;
+  var outer = rings[0].map(function(coord) {
+    return Cesium.Cartesian3.fromDegrees(Number(coord[0]), Number(coord[1]), baseHeight);
+  });
+  var holes = rings.slice(1).map(function(ring) {
+    return new Cesium.PolygonHierarchy(ring.map(function(coord) {
+      return Cesium.Cartesian3.fromDegrees(Number(coord[0]), Number(coord[1]), baseHeight);
+    }));
+  });
+  return new Cesium.PolygonHierarchy(outer, holes);
+}
+
+function zoneColor(Cesium, hex, alpha) {
+  try {
+    return Cesium.Color.fromCssColorString(hex).withAlpha(alpha);
+  } catch (err) {
+    return Cesium.Color.CYAN.withAlpha(alpha);
+  }
+}
+
+async function ensureDrone3DViewer(scene) {
+  var Cesium = await ensureCesiumLoaded();
+  var requestedTerrain = scene.scene && scene.scene.terrain && scene.scene.terrain.provider ? scene.scene.terrain.provider : 'ellipsoid';
+  var accessToken = (scene.scene && scene.scene.terrain && scene.scene.terrain.ion_token) || CESIUM_ION_TOKEN || '';
+  if (accessToken && Cesium.Ion) {
+    Cesium.Ion.defaultAccessToken = accessToken;
+  }
+  if (!drone3dViewer || drone3dTerrainMode !== requestedTerrain) {
+    if (drone3dViewer) {
+      drone3dViewer.destroy();
+      drone3dViewer = null;
+    }
+    var terrainProvider = new Cesium.EllipsoidTerrainProvider();
+    if (requestedTerrain === 'ion') {
+      try {
+        if (typeof Cesium.createWorldTerrainAsync === 'function') {
+          terrainProvider = await Cesium.createWorldTerrainAsync();
+        } else if (typeof Cesium.createWorldTerrain === 'function') {
+          terrainProvider = Cesium.createWorldTerrain();
+        }
+      } catch (err) {
+        requestedTerrain = 'ellipsoid';
+        terrainProvider = new Cesium.EllipsoidTerrainProvider();
+      }
+    }
+    drone3dViewer = new Cesium.Viewer('drone3dCanvas', {
+      terrainProvider: terrainProvider,
+      animation: false,
+      timeline: false,
+      baseLayerPicker: false,
+      geocoder: false,
+      sceneModePicker: false,
+      homeButton: false,
+      navigationHelpButton: false,
+      fullscreenButton: false,
+      infoBox: false,
+      selectionIndicator: false,
+      shouldAnimate: false,
+    });
+    drone3dViewer.scene.globe.depthTestAgainstTerrain = true;
+    drone3dTerrainMode = requestedTerrain;
+  }
+  return { Cesium: Cesium, viewer: drone3dViewer, terrainMode: drone3dTerrainMode };
+}
+
+function renderDroneTrack(Cesium, viewer, track) {
+  if (!track || !track.length) return;
+  var positions = track.map(function(point) {
+    return Cesium.Cartesian3.fromDegrees(Number(point.longitude), Number(point.latitude), Number(point.altitude || 0));
+  });
+  viewer.entities.add({
+    polyline: {
+      positions: positions,
+      width: 3,
+      material: Cesium.Color.CYAN,
+    },
+  });
+}
+
+function renderDroneEntity(Cesium, viewer, drone) {
+  var position = Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), Number(drone.altitude || 0));
+  var hpr = new Cesium.HeadingPitchRoll(
+    Cesium.Math.toRadians(Number(drone.heading || 0)),
+    Cesium.Math.toRadians(Number(drone.pitch || 0)),
+    Cesium.Math.toRadians(Number(drone.roll || 0))
+  );
+  viewer.entities.add({
+    id: 'focus-drone',
+    position: position,
+    orientation: Cesium.Transforms.headingPitchRollQuaternion(position, hpr),
+    box: {
+      dimensions: new Cesium.Cartesian3(18, 18, 6),
+      material: Cesium.Color.fromCssColorString('#58a6ff').withAlpha(0.95),
+      outline: true,
+      outlineColor: Cesium.Color.WHITE.withAlpha(0.8),
+    },
+    label: {
+      text: drone.drone_id || 'DRONE',
+      font: '14px sans-serif',
+      fillColor: Cesium.Color.WHITE,
+      showBackground: true,
+      backgroundColor: Cesium.Color.BLACK.withAlpha(0.65),
+      pixelOffset: new Cesium.Cartesian2(0, -28),
+    },
+  });
+}
+
+function renderNearbyAircraft(Cesium, viewer, aircraft) {
+  (aircraft || []).forEach(function(drone) {
+    viewer.entities.add({
+      position: Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), Number(drone.altitude || 0)),
+      point: {
+        pixelSize: 10,
+        color: Cesium.Color.ORANGE,
+        outlineColor: Cesium.Color.WHITE,
+        outlineWidth: 1,
+      },
+      label: {
+        text: String(drone.drone_id || 'ACFT'),
+        font: '12px sans-serif',
+        fillColor: Cesium.Color.ORANGE,
+        showBackground: true,
+        backgroundColor: Cesium.Color.BLACK.withAlpha(0.55),
+        pixelOffset: new Cesium.Cartesian2(0, -20),
+      },
+    });
+  });
+}
+
+function renderObstacles(Cesium, viewer, obstacles) {
+  (obstacles || []).forEach(function(obstacle) {
+    var position = Cesium.Cartesian3.fromDegrees(
+      Number(obstacle.longitude),
+      Number(obstacle.latitude),
+      Number(obstacle.base_altitude_m || 0) + Number(obstacle.height_m || 0) / 2.0
+    );
+    if (String(obstacle.kind || '') === 'building') {
+      viewer.entities.add({
+        position: position,
+        box: {
+          dimensions: new Cesium.Cartesian3(
+            Number(obstacle.footprint_radius_m || 18) * 1.8,
+            Number(obstacle.footprint_radius_m || 18) * 1.8,
+            Number(obstacle.height_m || 20)
+          ),
+          material: Cesium.Color.SANDYBROWN.withAlpha(0.7),
+        },
+      });
+      return;
+    }
+    viewer.entities.add({
+      position: position,
+      cylinder: {
+        length: Number(obstacle.height_m || 20),
+        topRadius: Math.max(Number(obstacle.footprint_radius_m || 8) * 0.25, 3),
+        bottomRadius: Number(obstacle.footprint_radius_m || 8),
+        material: Cesium.Color.GOLDENROD.withAlpha(0.72),
+      },
+    });
+  });
+}
+
+function renderZones3D(Cesium, viewer, zones) {
+  (zones || []).forEach(function(zone) {
+    var geometry = zone.geometry || {};
+    var lower = Number(zone.lower_altitude_m || 0);
+    var upper = Number(zone.upper_altitude_m || Math.max(lower + 60, 120));
+    var material = zoneColor(Cesium, zone.color || '#58a6ff', 0.18);
+    var outlineColor = zoneColor(Cesium, zone.color || '#58a6ff', 0.82);
+    if (geometry.type === 'Polygon') {
+      var hierarchy = polygonHierarchyFromRings(Cesium, geometry.coordinates || [], lower);
+      if (!hierarchy) return;
+      viewer.entities.add({
+        polygon: {
+          hierarchy: hierarchy,
+          height: lower,
+          extrudedHeight: upper,
+          material: material,
+          outline: true,
+          outlineColor: outlineColor,
+        },
+      });
+      return;
+    }
+    if (geometry.type === 'MultiPolygon') {
+      (geometry.coordinates || []).forEach(function(polygonRings) {
+        var hierarchy = polygonHierarchyFromRings(Cesium, polygonRings || [], lower);
+        if (!hierarchy) return;
+        viewer.entities.add({
+          polygon: {
+            hierarchy: hierarchy,
+            height: lower,
+            extrudedHeight: upper,
+            material: material,
+            outline: true,
+            outlineColor: outlineColor,
+          },
+        });
+      });
+    }
+  });
+}
+
+async function openDrone3D(droneId) {
+  if (!authenticatedUser || !droneId) return;
+  document.getElementById('drone3dOverlay').style.display = 'block';
+  drone3dStatus('Loading 3D scene around the selected drone...', 'info');
+  try {
+    var res = await fetch('/api/drones/' + encodeURIComponent(droneId) + '/scene-3d');
+    var scene = await res.json().catch(function() { return {}; });
+    if (!res.ok) {
+      throw new Error(scene.error || 'Failed to build the 3D scene.');
+    }
+    setDrone3DMeta(scene);
+    document.getElementById('drone3dSubtitle').textContent =
+      '10 km operational bubble around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Relief is loaded only if terrain credentials are configured.';
+    var prepared = await ensureDrone3DViewer(scene);
+    var Cesium = prepared.Cesium;
+    var viewer = prepared.viewer;
+    viewer.entities.removeAll();
+    renderZones3D(Cesium, viewer, scene.zones || []);
+    renderObstacles(Cesium, viewer, scene.obstacles || []);
+    renderNearbyAircraft(Cesium, viewer, scene.nearby_aircraft || []);
+    renderDroneTrack(Cesium, viewer, (scene.drone && scene.drone.track) || []);
+    renderDroneEntity(Cesium, viewer, scene.drone || {});
+    var camera = scene.scene && scene.scene.camera ? scene.scene.camera : {};
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(
+        Number(camera.longitude || scene.drone.longitude || 0),
+        Number(camera.latitude || scene.drone.latitude || 0),
+        Number(camera.altitude_m || 1200)
+      ),
+      orientation: {
+        heading: Cesium.Math.toRadians(Number(camera.heading_deg || 0)),
+        pitch: Cesium.Math.toRadians(Number(camera.pitch_deg || -35)),
+        roll: 0,
+      },
+      duration: 1.4,
+    });
+    if (prepared.terrainMode === 'ion') {
+      drone3dStatus('3D scene loaded with Cesium terrain. The 2D Leaflet map remains available underneath.', 'ok');
+    } else {
+      drone3dStatus('3D scene loaded without remote terrain. Set DRONE_CESIUM_ION_TOKEN to add terrain relief later.', 'warn');
+    }
+  } catch (err) {
+    drone3dStatus(err && err.message ? err.message : '3D scene failed to load.', 'error');
+  }
+}
+
 function renderMyDrones(drones) {
   latestMyDrones = drones || [];
   ensureMyDroneLayer();
@@ -1431,6 +1832,7 @@ function renderMyDrones(drones) {
         '</div>' +
         '<div class="drone-actions">' +
           '<button type="button" onclick="focusDrone(\\'' + (drone.drone_id || '') + '\\')">Show on map</button>' +
+          '<button type="button" onclick="openDrone3D(\\'' + (drone.drone_id || '') + '\\')">3D view</button>' +
         '</div>' +
       '</div>'
     );
@@ -1538,6 +1940,50 @@ async function restoreServerSession() {
   return false;
 }
 
+async function bootstrapDemoFlightPlan() {
+  if (!authenticatedUser) {
+    return { created: false, reason: 'signed-out' };
+  }
+  try {
+    const res = await fetch('/api/demo/bootstrap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to bootstrap demo flight plan.');
+    }
+    return data || { created: false, reason: 'unknown' };
+  } catch (err) {
+    console.error('Demo flight bootstrap failed', err);
+    return { created: false, reason: 'request-failed' };
+  }
+}
+
+async function refreshAuthenticatedWorkspace(user) {
+  const currentEmail = user && user.email ? user.email : '';
+  const run = (async function() {
+    await bootstrapDemoFlightPlan();
+    if (!authenticatedUser || authenticatedUser.email !== currentEmail) {
+      return;
+    }
+    await loadMyFlightPlans(false);
+    if (!authenticatedUser || authenticatedUser.email !== currentEmail) {
+      return;
+    }
+    startMyDroneRefresh();
+    prefillFlightPlanForm();
+  })();
+  authWorkspaceRefreshPromise = run;
+  try {
+    await run;
+  } finally {
+    if (authWorkspaceRefreshPromise === run) {
+      authWorkspaceRefreshPromise = null;
+    }
+  }
+}
+
 function setAuthError(message) {
   document.getElementById('authError').textContent = message || '';
 }
@@ -1566,9 +2012,9 @@ function unlockAuthenticatedUi(user) {
     layersLoaded = true;
     loadAllLayers();
   }
-  loadMyFlightPlans(false);
-  startMyDroneRefresh();
-  prefillFlightPlanForm();
+  refreshAuthenticatedWorkspace(user).catch(function(err) {
+    console.error('Failed to refresh authenticated workspace', err);
+  });
 }
 
 function showAuthGate(message) {
@@ -1576,6 +2022,7 @@ function showAuthGate(message) {
   updateAuthenticatedUser();
   setAuthError(message || '');
   document.getElementById('authGate').style.display = 'flex';
+  closeDrone3D();
   renderMyFlightPlans([]);
   stopMyDroneRefresh();
   renderMyDrones([]);
@@ -3373,6 +3820,72 @@ def _list_live_drones_for_admin() -> list[dict]:
     )
 
 
+def _build_drone_3d_scene(drone_id: str, *, owner_email: str | None, admin_view: bool = False) -> dict:
+    return DRONE_3D_SCENE_SERVICE.build_scene(
+        drone_id,
+        owner_email=owner_email,
+        radius_km=10.0,
+        admin_view=admin_view,
+    )
+
+
+def _bootstrap_demo_flight_plan(owner: dict) -> dict:
+    if not AUTO_DEMO_FLIGHT_PLAN_ENABLED:
+        return {"created": False, "reason": "disabled"}
+
+    active_plans = _list_flight_plans_response(
+        owner_email=owner["email"],
+        include_past=False,
+        include_cancelled=False,
+    )
+    for plan in active_plans:
+        if (plan.get("runtime_state") or "").lower() == "ongoing":
+            return {
+                "created": False,
+                "reason": "existing-ongoing",
+                "flight_plan": plan,
+            }
+
+    now_local = datetime.now(ZoneInfo("Europe/Bucharest"))
+    start_local = now_local.replace(second=0, microsecond=0) - timedelta(minutes=5)
+    end_local = start_local + timedelta(minutes=60)
+    owner_name = (owner.get("display_name") or owner.get("email") or "Demo Pilot").strip()
+    registration_suffix = str(uuid.uuid4()).split("-")[0].upper()
+
+    demo_payload = {
+        "operator_name": owner_name,
+        "operator_contact": "Auto demo bootstrap",
+        "contact_person": owner_name,
+        "phone_landline": "-",
+        "phone_mobile": "0712345678",
+        "fax": "-",
+        "operator_email": owner["email"],
+        "uas_registration": f"YR-DEMO-{registration_suffix}",
+        "uas_class_code": "C2",
+        "category": "A2",
+        "operation_mode": "VLOS",
+        "mtom_kg": "1.4",
+        "pilot_name": owner_name,
+        "pilot_phone": "0712345678",
+        "purpose": "Automatic demo flight for 2D/3D feature discovery",
+        "location_name": "PETROSANI Demo",
+        "area_kind": "circle",
+        "center_lon": 24.0271,
+        "center_lat": 45.444717,
+        "radius_m": 180,
+        "max_altitude_m": 120,
+        "selected_twr": "LRAR",
+        "start_date": start_local.strftime("%Y-%m-%d"),
+        "end_date": end_local.strftime("%Y-%m-%d"),
+        "start_time": start_local.strftime("%H:%M"),
+        "end_time": end_local.strftime("%H:%M"),
+        "timezone": "Europe/Bucharest",
+        "created_from_app": "auto_demo_bootstrap",
+    }
+    created = _create_flight_plan_from_payload(demo_payload, owner)
+    return {"created": True, "flight_plan": created}
+
+
 def _run_mock_drone_loop(stop_event: threading.Event):
     while not stop_event.is_set():
         try:
@@ -3419,6 +3932,10 @@ class Handler(BaseHTTPRequestHandler):
             page = page.replace(
                 b"__TOWER_CONTACTS_JSON__",
                 json.dumps(TOWER_CONTACTS, ensure_ascii=False).encode("utf-8"),
+            )
+            page = page.replace(
+                b"__CESIUM_ION_TOKEN__",
+                CESIUM_ION_TOKEN.encode("utf-8"),
             )
             self._send(
                 200,
@@ -3468,6 +3985,37 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except PermissionError as exc:
                 self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+
+        elif path.startswith("/api/drones/") and path.endswith("/scene-3d"):
+            drone_id = path[len("/api/drones/"):-len("/scene-3d")].strip("/")
+            try:
+                user = _require_session_user(self.headers)
+                scene = _build_drone_3d_scene(drone_id, owner_email=user["email"], admin_view=False)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(scene, ensure_ascii=False),
+                )
+            except PermissionError as exc:
+                self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+            except LookupError as exc:
+                self._send(404, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+            except Exception as exc:
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+
+        elif path.startswith("/api/admin/drones/") and path.endswith("/scene-3d"):
+            drone_id = path[len("/api/admin/drones/"):-len("/scene-3d")].strip("/")
+            try:
+                scene = _build_drone_3d_scene(drone_id, owner_email=None, admin_view=True)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(scene, ensure_ascii=False),
+                )
+            except LookupError as exc:
+                self._send(404, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+            except Exception as exc:
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/healthz":
             self._send(200, "application/json; charset=utf-8", b'{"ok": true}')
@@ -3659,6 +4207,24 @@ class Handler(BaseHTTPRequestHandler):
                 b'{"ok": true}',
                 extra_headers={"Set-Cookie": AUTH_MODULE.clear_cookie_header()},
             )
+
+        elif path == "/api/demo/bootstrap":
+            try:
+                owner = _require_session_user(self.headers)
+                result = _bootstrap_demo_flight_plan(owner)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(result, ensure_ascii=False),
+                )
+            except PermissionError as exc:
+                self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+            except _flight_plan_error as exc:
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+            except FlightPlanRepositoryError as exc:
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+            except Exception as exc:
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/flight-plans/assess":
             try:
