@@ -671,7 +671,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     function droneBadgeClass(status) {
       const normalized = String(status || 'unknown').toLowerCase();
       if (normalized === 'flying') return 'ok';
-      if (normalized === 'ready') return 'warn';
+      if (normalized === 'scheduled') return 'warn';
       return 'info';
     }
 
@@ -681,7 +681,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('summaryLiveDronesSub').textContent =
         drones.length ? `Latest ping ${formatValue(drones[0].timestamp)}` : 'No active drone telemetry';
       document.getElementById('liveDronesCaption').textContent =
-        `${drones.length} drone${drones.length === 1 ? '' : 's'} currently tied to active flight plans`;
+        `${drones.length} drone${drones.length === 1 ? '' : 's'} currently airborne on ongoing flight plans`;
 
       const rows = document.getElementById('liveDroneRows');
       if (!drones.length) {
@@ -865,6 +865,7 @@ HTML = b"""<!DOCTYPE html>
     --accent: #e94560; --blue: #58a6ff; --green: #3fb950;
     --orange: #d29922; --purple: #bc8cff; --cyan: #39d2c0;
     --text: #c9d1d9; --muted: #8b949e;
+    --sidebar-w: 364px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif; background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
@@ -906,7 +907,7 @@ HTML = b"""<!DOCTYPE html>
 
   /* Sidebar */
   #sidebar {
-    width: 280px; min-width: 280px; background: var(--bg2); border-right: 1px solid var(--border);
+    width: var(--sidebar-w); min-width: var(--sidebar-w); background: var(--bg2); border-right: 1px solid var(--border);
     display: flex; flex-direction: column; overflow-y: auto; z-index: 1001;
   }
   .sb-header {
@@ -934,8 +935,9 @@ HTML = b"""<!DOCTYPE html>
   }
   .auth-signout:hover { border-color: var(--accent); color: #fff; }
 
-  .sb-section { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .sb-section { padding: 14px 18px; border-bottom: 1px solid var(--border); }
   .sb-section h2 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 8px; }
+  .sb-caption { color: var(--muted); font-size: 0.73rem; line-height: 1.45; margin: 6px 0 0; }
 
   .mode-toggle { display: flex; gap: 4px; }
   .mode-btn {
@@ -1050,7 +1052,7 @@ HTML = b"""<!DOCTYPE html>
   .risk-high { background: rgba(233,69,96,.18); color: #ffb4ab; }
 
   #fpOverlay {
-    display: none; position: absolute; top: 0; left: 280px; right: 0; bottom: 0;
+    display: none; position: absolute; top: 0; left: var(--sidebar-w); right: 0; bottom: 0;
     z-index: 2000; background: rgba(0,0,0,.45);
   }
   #fpWizard {
@@ -1153,7 +1155,7 @@ HTML = b"""<!DOCTYPE html>
     font-size:.68rem; padding:3px 8px; border-radius:999px; text-transform:uppercase; font-weight:700;
     background: rgba(35,134,54,.18); color:#8ae1a7;
   }
-  .drone-card .drone-status.ready { background: rgba(210,153,34,.16); color:#ffd48a; }
+  .drone-card .drone-status.scheduled { background: rgba(210,153,34,.16); color:#ffd48a; }
   .drone-card .drone-status.offline { background: rgba(218,54,51,.16); color:#ff9893; }
   .drone-card .drone-grid {
     display:grid; grid-template-columns: 1fr 1fr; gap:6px 10px; color:var(--text);
@@ -1161,9 +1163,14 @@ HTML = b"""<!DOCTYPE html>
   .drone-card .drone-grid span { color: var(--muted); display:block; font-size:.68rem; margin-bottom:1px; }
   .drone-card .drone-actions { display:flex; gap:8px; margin-top:10px; }
   .drone-card .drone-actions button {
-    flex:1; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); padding:8px 10px; cursor:pointer;
+    flex:1; border:1px solid rgba(88,166,255,.45); border-radius:8px; background:rgba(88,166,255,.12); color:#d7ecff; padding:9px 12px; cursor:pointer; font-weight:700;
   }
-  .drone-card .drone-actions button:hover { border-color: var(--accent); }
+  .drone-card .drone-actions button:hover { border-color: var(--accent); background: rgba(233,69,96,.12); color: #fff; }
+  .drone-note {
+    margin-top: 8px; padding: 9px 10px; border-radius: 8px;
+    background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.35);
+    color: #ffd48a; font-size: .73rem; line-height: 1.45;
+  }
   .draw-hint {
     background: rgba(233,69,96,.12); border: 1px dashed var(--accent);
     border-radius:8px; padding:10px 12px; font-size:.8rem;
@@ -1171,6 +1178,10 @@ HTML = b"""<!DOCTYPE html>
   }
   .draw-hint .hint-icon { font-size:1.4rem; display:block; margin-bottom:4px; }
   #fpCircleInfo { font-size:.76rem; color:var(--muted); margin-top:6px; }
+
+  @media (max-width: 1100px) {
+    :root { --sidebar-w: 320px; }
+  }
 </style>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
@@ -1241,6 +1252,7 @@ HTML = b"""<!DOCTYPE html>
 
   <div class="sb-section">
     <h2>Live Drone</h2>
+    <div class="sb-caption">Only drones on ongoing flight plans appear here. Scheduled flights stay in your flight plan list until takeoff.</div>
     <button class="fp-launch-btn fp-secondary-btn" onclick="loadMyDrones(true)">Refresh My Drone</button>
     <div class="my-plans-list" id="myDroneList">
       <div class="muted">Sign in to load your live drone telemetry.</div>
@@ -1285,6 +1297,7 @@ let authenticatedUser = null;
 let myDroneRefreshTimer = null;
 let latestMyDrones = [];
 let myDroneLayer = null;
+let myDroneMarkers = {};
 const CENTER_BLOCKING_LAYER_KEYS = ['ctr', 'uas_zones', 'notam', 'tma'];
 
 function setMyPlansContent(html) {
@@ -1364,19 +1377,24 @@ function focusDrone(droneId) {
   var drone = latestMyDrones.find(function(item) { return item.drone_id === droneId; });
   if (!drone) return;
   map.setView([Number(drone.latitude), Number(drone.longitude)], 15);
+  var marker = myDroneMarkers[droneId];
+  if (marker) {
+    marker.openPopup();
+  }
 }
 
 function renderMyDrones(drones) {
   latestMyDrones = drones || [];
   ensureMyDroneLayer();
   myDroneLayer.clearLayers();
+  myDroneMarkers = {};
 
   if (!authenticatedUser) {
     setMyDronesContent('<div class="muted">Sign in to load your live drone telemetry.</div>');
     return;
   }
   if (!drones || !drones.length) {
-    setMyDronesContent('<div class="muted">No active or upcoming drone telemetry for your flight plans yet.</div>');
+    setMyDronesContent('<div class="muted">No drones are currently flying for your account.</div><div class="drone-note">Mock drones for upcoming flight plans are not shown here. This panel is reserved for active flights already in progress.</div>');
     return;
   }
 
@@ -1390,6 +1408,7 @@ function renderMyDrones(drones) {
       'Alt ' + Number(drone.altitude || 0).toFixed(1) + ' m | BAT ' + Number(drone.battery_level || 0).toFixed(0) + '%'
     );
     marker.addTo(myDroneLayer);
+    myDroneMarkers[drone.drone_id] = marker;
   });
 
   var html = drones.map(function(drone) {
@@ -1411,7 +1430,7 @@ function renderMyDrones(drones) {
           '<div><span>Position</span>' + Number(drone.latitude || 0).toFixed(5) + ', ' + Number(drone.longitude || 0).toFixed(5) + '</div>' +
         '</div>' +
         '<div class="drone-actions">' +
-          '<button type="button" onclick="focusDrone(\\'' + (drone.drone_id || '') + '\\')">Focus on map</button>' +
+          '<button type="button" onclick="focusDrone(\\'' + (drone.drone_id || '') + '\\')">Show on map</button>' +
         '</div>' +
       '</div>'
     );
@@ -3341,8 +3360,8 @@ def _build_admin_overview_response() -> dict:
 def _list_live_drones_for_user(owner_email: str) -> list[dict]:
     return DRONE_TRACKING_REPO.list_live_drones(
         owner_email=owner_email,
-        include_upcoming=True,
-        only_ongoing=False,
+        include_upcoming=False,
+        only_ongoing=True,
     )
 
 

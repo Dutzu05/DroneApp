@@ -77,7 +77,7 @@ class MockTelemetryServiceTests(unittest.TestCase):
         self.assertEqual(ongoing['status'], 'flying')
         self.assertGreater(ongoing['altitude'], 10)
         self.assertGreater(ongoing['speed'], 5)
-        self.assertEqual(upcoming['status'], 'ready')
+        self.assertEqual(upcoming['status'], 'scheduled')
         self.assertLess(upcoming['altitude'], 10)
         self.assertLess(upcoming['speed'], 2)
         self.assertTrue(str(ongoing['drone_id']).startswith('MOCK-'))

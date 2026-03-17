@@ -66,7 +66,7 @@ class DroneMockTelemetryService:
             altitude = 2.0 + abs(math.sin(phase / 5.0)) * 1.5
             speed = 0.6 + abs(math.sin(phase / 3.0)) * 0.8
             battery = max(35.0, 98.0 - ((int(now.timestamp()) + seed) % 3600) / 240.0)
-            status = 'ready'
+            status = 'scheduled'
 
         heading = (math.degrees(phase / 1.8) + 90.0) % 360.0
         pitch = math.sin(phase / 2.8) * (5.0 if runtime_state == 'ongoing' else 1.2)

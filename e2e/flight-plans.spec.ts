@@ -73,6 +73,8 @@ test.describe('Critical Flight Plan Journeys', () => {
     await page.locator('#fpSaveBtn').click();
     await expect(page.locator('#fpSavedSummary')).toContainText('Download ANEXA 1 PDF');
     const createdPlanId = await page.locator('#fpSavedSummary .saved-title').innerText();
+    await page.locator('#fpOverlay .close-wiz').click();
+    await expect(page.locator('#fpOverlay')).toBeHidden();
     await expect(page.locator('#myPlansList')).toContainText(createdPlanId);
 
     await page.locator(`#myPlansList button:has-text("Cancel")`).first().click();
