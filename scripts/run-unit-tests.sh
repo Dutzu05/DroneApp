@@ -7,6 +7,8 @@ cd "$repo_root"
 PYTHON_BIN="python3"
 if [ -x "$repo_root/.venv/bin/python" ]; then
   PYTHON_BIN="$repo_root/.venv/bin/python"
+elif [ -x "$repo_root/.venv/Scripts/python.exe" ]; then
+  PYTHON_BIN="$repo_root/.venv/Scripts/python.exe"
 fi
 
 if ! "$PYTHON_BIN" -m coverage --version >/dev/null 2>&1; then
