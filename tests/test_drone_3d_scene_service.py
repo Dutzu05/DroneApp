@@ -112,7 +112,12 @@ class Drone3DSceneServiceTests(unittest.TestCase):
         self.assertEqual(len(scene['zones']), 1)
         self.assertEqual(scene['zones'][0]['zone_id'], 'ctr-clj')
         self.assertEqual(scene['zones'][0]['color'], '#58a6ff')
+        self.assertEqual(scene['scene']['radius_km'], 10.0)
+        self.assertEqual(scene['scene']['focus_region']['radius_m'], 10_000.0)
         self.assertEqual(scene['scene']['terrain']['provider'], 'ion')
+        self.assertEqual(scene['scene']['imagery']['provider'], 'openstreetmap')
+        self.assertEqual(scene['scene']['buildings']['provider'], 'cesium_osm_buildings')
+        self.assertEqual(scene['scene']['follow']['refresh_interval_s'], 5)
         self.assertEqual(len(scene['obstacles']), 6)
 
     def test_build_scene_raises_for_missing_drone(self):

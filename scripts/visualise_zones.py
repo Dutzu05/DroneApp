@@ -1381,6 +1381,12 @@ let myDroneMarkers = {};
 let drone3dViewer = null;
 let drone3dLoadPromise = null;
 let drone3dTerrainMode = '';
+let drone3dImageryMode = '';
+let drone3dBuildingsMode = '';
+let drone3dBuildingsTileset = null;
+let drone3dRefreshTimer = null;
+let drone3dActiveDroneId = '';
+let drone3dFetchInFlight = false;
 const CENTER_BLOCKING_LAYER_KEYS = ['ctr', 'uas_zones', 'notam', 'tma'];
 
 function setMyPlansContent(html) {
@@ -1473,10 +1479,12 @@ function drone3dStatus(message, kind) {
 }
 
 function setDrone3DMeta(scene) {
+  var buildingsProvider = scene.scene && scene.scene.buildings && scene.scene.buildings.provider ? scene.scene.buildings.provider : 'none';
+  var imageryProvider = scene.scene && scene.scene.imagery && scene.scene.imagery.provider ? scene.scene.imagery.provider : '-';
   var metrics = [
     { label: 'Drone', value: (scene.drone && scene.drone.drone_id) || '-' },
-    { label: 'Terrain', value: scene.scene && scene.scene.terrain && scene.scene.terrain.provider ? scene.scene.terrain.provider : '-' },
-    { label: 'Airspace Blocks', value: String((scene.zones || []).length) },
+    { label: 'Radius', value: String(Number(scene.scene && scene.scene.radius_km || 0).toFixed(0)) + ' km' },
+    { label: 'Surface', value: imageryProvider + ' + ' + buildingsProvider },
     { label: 'Nearby Aircraft', value: String((scene.nearby_aircraft || []).length) },
   ];
   document.getElementById('drone3dMeta').innerHTML = metrics.map(function(item) {
@@ -1485,6 +1493,14 @@ function setDrone3DMeta(scene) {
 }
 
 function closeDrone3D() {
+  if (drone3dRefreshTimer) {
+    clearInterval(drone3dRefreshTimer);
+    drone3dRefreshTimer = null;
+  }
+  drone3dActiveDroneId = '';
+  if (drone3dViewer) {
+    drone3dViewer.trackedEntity = undefined;
+  }
   document.getElementById('drone3dOverlay').style.display = 'none';
 }
 
@@ -1558,20 +1574,25 @@ function zoneColor(Cesium, hex, alpha) {
 async function ensureDrone3DViewer(scene) {
   var Cesium = await ensureCesiumLoaded();
   var requestedTerrain = scene.scene && scene.scene.terrain && scene.scene.terrain.provider ? scene.scene.terrain.provider : 'ellipsoid';
+  var requestedImagery = scene.scene && scene.scene.imagery && scene.scene.imagery.provider ? scene.scene.imagery.provider : 'openstreetmap';
   var accessToken = (scene.scene && scene.scene.terrain && scene.scene.terrain.ion_token) || CESIUM_ION_TOKEN || '';
   if (accessToken && Cesium.Ion) {
     Cesium.Ion.defaultAccessToken = accessToken;
   }
-  if (!drone3dViewer || drone3dTerrainMode !== requestedTerrain) {
+  if (!drone3dViewer || drone3dTerrainMode !== requestedTerrain || drone3dImageryMode !== requestedImagery) {
     if (drone3dViewer) {
       drone3dViewer.destroy();
       drone3dViewer = null;
+      drone3dBuildingsTileset = null;
     }
     var terrainProvider = new Cesium.EllipsoidTerrainProvider();
     if (requestedTerrain === 'ion') {
       try {
         if (typeof Cesium.createWorldTerrainAsync === 'function') {
-          terrainProvider = await Cesium.createWorldTerrainAsync();
+          terrainProvider = await Cesium.createWorldTerrainAsync({
+            requestWaterMask: true,
+            requestVertexNormals: true,
+          });
         } else if (typeof Cesium.createWorldTerrain === 'function') {
           terrainProvider = Cesium.createWorldTerrain();
         }
@@ -1580,8 +1601,15 @@ async function ensureDrone3DViewer(scene) {
         terrainProvider = new Cesium.EllipsoidTerrainProvider();
       }
     }
+    var imageryProvider = undefined;
+    if (requestedImagery === 'openstreetmap' && Cesium.OpenStreetMapImageryProvider) {
+      imageryProvider = new Cesium.OpenStreetMapImageryProvider({
+        url: scene.scene && scene.scene.imagery && scene.scene.imagery.url ? scene.scene.imagery.url : 'https://tile.openstreetmap.org/',
+      });
+    }
     drone3dViewer = new Cesium.Viewer('drone3dCanvas', {
       terrainProvider: terrainProvider,
+      imageryProvider: imageryProvider,
       animation: false,
       timeline: false,
       baseLayerPicker: false,
@@ -1595,9 +1623,48 @@ async function ensureDrone3DViewer(scene) {
       shouldAnimate: false,
     });
     drone3dViewer.scene.globe.depthTestAgainstTerrain = true;
+    drone3dViewer.scene.globe.enableLighting = requestedTerrain === 'ion';
+    drone3dViewer.scene.skyAtmosphere.show = true;
+    drone3dViewer.shadows = requestedTerrain === 'ion';
     drone3dTerrainMode = requestedTerrain;
+    drone3dImageryMode = requestedImagery;
   }
   return { Cesium: Cesium, viewer: drone3dViewer, terrainMode: drone3dTerrainMode };
+}
+
+function removeDrone3DEntities(viewer, prefixes) {
+  viewer.entities.values.slice().forEach(function(entity) {
+    var id = String(entity.id || '');
+    if (prefixes.some(function(prefix) { return id.indexOf(prefix) === 0; })) {
+      viewer.entities.remove(entity);
+    }
+  });
+}
+
+function renderOperationalRegion(Cesium, viewer, scene, drone) {
+  if (!scene || !scene.scene || !scene.scene.focus_region || !drone) return;
+  var region = scene.scene.focus_region;
+  var centerHeight = Math.max(Number(drone.altitude || 0) * 0.12, 2);
+  var ellipse = {
+    semiMajorAxis: Number(region.radius_m || 5000),
+    semiMinorAxis: Number(region.radius_m || 5000),
+    height: 0,
+    material: Cesium.Color.fromCssColorString('#58a6ff').withAlpha(0.08),
+    outline: true,
+    outlineColor: Cesium.Color.fromCssColorString('#58a6ff').withAlpha(0.82),
+    classificationType: Cesium.ClassificationType.BOTH,
+  };
+  var entity = viewer.entities.getById('focus-region');
+  if (entity) {
+    entity.position = Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), centerHeight);
+    entity.ellipse = ellipse;
+    return;
+  }
+  viewer.entities.add({
+    id: 'focus-region',
+    position: Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), centerHeight),
+    ellipse: ellipse,
+  });
 }
 
 function renderDroneTrack(Cesium, viewer, track) {
@@ -1605,26 +1672,37 @@ function renderDroneTrack(Cesium, viewer, track) {
   var positions = track.map(function(point) {
     return Cesium.Cartesian3.fromDegrees(Number(point.longitude), Number(point.latitude), Number(point.altitude || 0));
   });
+  var polyline = {
+    positions: positions,
+    width: 4,
+    material: new Cesium.PolylineGlowMaterialProperty({
+      color: Cesium.Color.CYAN,
+      glowPower: 0.18,
+    }),
+  };
+  var entity = viewer.entities.getById('focus-drone-track');
+  if (entity) {
+    entity.polyline = polyline;
+    return;
+  }
   viewer.entities.add({
-    polyline: {
-      positions: positions,
-      width: 3,
-      material: Cesium.Color.CYAN,
-    },
+    id: 'focus-drone-track',
+    polyline: polyline,
   });
 }
 
-function renderDroneEntity(Cesium, viewer, drone) {
+function renderDroneEntity(Cesium, viewer, drone, scene) {
   var position = Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), Number(drone.altitude || 0));
   var hpr = new Cesium.HeadingPitchRoll(
     Cesium.Math.toRadians(Number(drone.heading || 0)),
     Cesium.Math.toRadians(Number(drone.pitch || 0)),
     Cesium.Math.toRadians(Number(drone.roll || 0))
   );
-  viewer.entities.add({
-    id: 'focus-drone',
+  var viewDistance = Math.max(Number(scene && scene.scene && scene.scene.focus_region && scene.scene.focus_region.radius_m || 5000) * 0.55, 1400);
+  var entityState = {
     position: position,
     orientation: Cesium.Transforms.headingPitchRollQuaternion(position, hpr),
+    viewFrom: new Cesium.Cartesian3(-viewDistance, 0, viewDistance * 0.38),
     box: {
       dimensions: new Cesium.Cartesian3(18, 18, 6),
       material: Cesium.Color.fromCssColorString('#58a6ff').withAlpha(0.95),
@@ -1639,12 +1717,24 @@ function renderDroneEntity(Cesium, viewer, drone) {
       backgroundColor: Cesium.Color.BLACK.withAlpha(0.65),
       pixelOffset: new Cesium.Cartesian2(0, -28),
     },
-  });
+  };
+  var entity = viewer.entities.getById('focus-drone');
+  if (entity) {
+    entity.position = entityState.position;
+    entity.orientation = entityState.orientation;
+    entity.viewFrom = entityState.viewFrom;
+    entity.box = entityState.box;
+    entity.label = entityState.label;
+    return entity;
+  }
+  return viewer.entities.add(Object.assign({ id: 'focus-drone' }, entityState));
 }
 
 function renderNearbyAircraft(Cesium, viewer, aircraft) {
+  removeDrone3DEntities(viewer, ['nearby-aircraft:']);
   (aircraft || []).forEach(function(drone) {
     viewer.entities.add({
+      id: 'nearby-aircraft:' + String(drone.drone_id || 'unknown'),
       position: Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), Number(drone.altitude || 0)),
       point: {
         pixelSize: 10,
@@ -1665,6 +1755,7 @@ function renderNearbyAircraft(Cesium, viewer, aircraft) {
 }
 
 function renderObstacles(Cesium, viewer, obstacles) {
+  removeDrone3DEntities(viewer, ['obstacle:']);
   (obstacles || []).forEach(function(obstacle) {
     var position = Cesium.Cartesian3.fromDegrees(
       Number(obstacle.longitude),
@@ -1673,6 +1764,7 @@ function renderObstacles(Cesium, viewer, obstacles) {
     );
     if (String(obstacle.kind || '') === 'building') {
       viewer.entities.add({
+        id: 'obstacle:' + String(obstacle.obstacle_id || obstacle.name || 'building'),
         position: position,
         box: {
           dimensions: new Cesium.Cartesian3(
@@ -1680,34 +1772,37 @@ function renderObstacles(Cesium, viewer, obstacles) {
             Number(obstacle.footprint_radius_m || 18) * 1.8,
             Number(obstacle.height_m || 20)
           ),
-          material: Cesium.Color.SANDYBROWN.withAlpha(0.7),
+          material: Cesium.Color.SANDYBROWN.withAlpha(0.5),
         },
       });
       return;
     }
     viewer.entities.add({
+      id: 'obstacle:' + String(obstacle.obstacle_id || obstacle.name || 'obstacle'),
       position: position,
       cylinder: {
         length: Number(obstacle.height_m || 20),
         topRadius: Math.max(Number(obstacle.footprint_radius_m || 8) * 0.25, 3),
         bottomRadius: Number(obstacle.footprint_radius_m || 8),
-        material: Cesium.Color.GOLDENROD.withAlpha(0.72),
+        material: Cesium.Color.GOLDENROD.withAlpha(0.5),
       },
     });
   });
 }
 
 function renderZones3D(Cesium, viewer, zones) {
-  (zones || []).forEach(function(zone) {
+  removeDrone3DEntities(viewer, ['zone:']);
+  (zones || []).forEach(function(zone, zoneIndex) {
     var geometry = zone.geometry || {};
     var lower = Number(zone.lower_altitude_m || 0);
     var upper = Number(zone.upper_altitude_m || Math.max(lower + 60, 120));
-    var material = zoneColor(Cesium, zone.color || '#58a6ff', 0.18);
-    var outlineColor = zoneColor(Cesium, zone.color || '#58a6ff', 0.82);
+    var material = zoneColor(Cesium, zone.color || '#58a6ff', 0.16);
+    var outlineColor = zoneColor(Cesium, zone.color || '#58a6ff', 0.74);
     if (geometry.type === 'Polygon') {
       var hierarchy = polygonHierarchyFromRings(Cesium, geometry.coordinates || [], lower);
       if (!hierarchy) return;
       viewer.entities.add({
+        id: 'zone:' + String(zone.zone_id || zoneIndex),
         polygon: {
           hierarchy: hierarchy,
           height: lower,
@@ -1720,10 +1815,11 @@ function renderZones3D(Cesium, viewer, zones) {
       return;
     }
     if (geometry.type === 'MultiPolygon') {
-      (geometry.coordinates || []).forEach(function(polygonRings) {
+      (geometry.coordinates || []).forEach(function(polygonRings, polygonIndex) {
         var hierarchy = polygonHierarchyFromRings(Cesium, polygonRings || [], lower);
         if (!hierarchy) return;
         viewer.entities.add({
+          id: 'zone:' + String(zone.zone_id || zoneIndex) + ':' + String(polygonIndex),
           polygon: {
             hierarchy: hierarchy,
             height: lower,
@@ -1738,34 +1834,58 @@ function renderZones3D(Cesium, viewer, zones) {
   });
 }
 
-async function openDrone3D(droneId) {
-  if (!authenticatedUser || !droneId) return;
-  document.getElementById('drone3dOverlay').style.display = 'block';
-  drone3dStatus('Loading 3D scene around the selected drone...', 'info');
+async function ensureDrone3DBuildings(Cesium, viewer, scene) {
+  var requestedBuildings = scene.scene && scene.scene.buildings && scene.scene.buildings.provider ? scene.scene.buildings.provider : 'none';
+  if (requestedBuildings === drone3dBuildingsMode && drone3dBuildingsTileset) {
+    drone3dBuildingsTileset.show = requestedBuildings !== 'none';
+    return requestedBuildings !== 'none';
+  }
+  if (drone3dBuildingsTileset) {
+    viewer.scene.primitives.remove(drone3dBuildingsTileset);
+    drone3dBuildingsTileset = null;
+  }
+  drone3dBuildingsMode = requestedBuildings;
+  if (requestedBuildings !== 'cesium_osm_buildings') {
+    return false;
+  }
   try {
-    var res = await fetch('/api/drones/' + encodeURIComponent(droneId) + '/scene-3d');
-    var scene = await res.json().catch(function() { return {}; });
-    if (!res.ok) {
-      throw new Error(scene.error || 'Failed to build the 3D scene.');
+    if (typeof Cesium.createOsmBuildingsAsync === 'function') {
+      drone3dBuildingsTileset = await Cesium.createOsmBuildingsAsync({
+        defaultColor: Cesium.Color.fromCssColorString('#d7c7a3').withAlpha(0.88),
+        enableShowOutline: false,
+      });
+    } else if (typeof Cesium.createOsmBuildings === 'function') {
+      drone3dBuildingsTileset = Cesium.createOsmBuildings();
     }
-    setDrone3DMeta(scene);
-    document.getElementById('drone3dSubtitle').textContent =
-      '10 km operational bubble around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Relief is loaded only if terrain credentials are configured.';
-    var prepared = await ensureDrone3DViewer(scene);
-    var Cesium = prepared.Cesium;
-    var viewer = prepared.viewer;
-    viewer.entities.removeAll();
-    renderZones3D(Cesium, viewer, scene.zones || []);
-    renderObstacles(Cesium, viewer, scene.obstacles || []);
-    renderNearbyAircraft(Cesium, viewer, scene.nearby_aircraft || []);
-    renderDroneTrack(Cesium, viewer, (scene.drone && scene.drone.track) || []);
-    renderDroneEntity(Cesium, viewer, scene.drone || {});
+    if (drone3dBuildingsTileset) {
+      viewer.scene.primitives.add(drone3dBuildingsTileset);
+      return true;
+    }
+  } catch (err) {
+    drone3dBuildingsTileset = null;
+  }
+  return false;
+}
+
+async function renderDrone3DScene(scene, options) {
+  var prepared = await ensureDrone3DViewer(scene);
+  var Cesium = prepared.Cesium;
+  var viewer = prepared.viewer;
+  var droneEntity = renderDroneEntity(Cesium, viewer, scene.drone || {}, scene);
+  renderOperationalRegion(Cesium, viewer, scene, scene.drone || {});
+  renderZones3D(Cesium, viewer, scene.zones || []);
+  renderObstacles(Cesium, viewer, scene.obstacles || []);
+  renderNearbyAircraft(Cesium, viewer, scene.nearby_aircraft || []);
+  renderDroneTrack(Cesium, viewer, (scene.drone && scene.drone.track) || []);
+  var buildingsLoaded = await ensureDrone3DBuildings(Cesium, viewer, scene);
+  viewer.trackedEntity = droneEntity;
+  if (!options || options.flyTo !== false) {
     var camera = scene.scene && scene.scene.camera ? scene.scene.camera : {};
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(
         Number(camera.longitude || scene.drone.longitude || 0),
         Number(camera.latitude || scene.drone.latitude || 0),
-        Number(camera.altitude_m || 1200)
+        Number(camera.altitude_m || 2200)
       ),
       orientation: {
         heading: Cesium.Math.toRadians(Number(camera.heading_deg || 0)),
@@ -1774,11 +1894,61 @@ async function openDrone3D(droneId) {
       },
       duration: 1.4,
     });
-    if (prepared.terrainMode === 'ion') {
-      drone3dStatus('3D scene loaded with Cesium terrain. The 2D Leaflet map remains available underneath.', 'ok');
-    } else {
-      drone3dStatus('3D scene loaded without remote terrain. Set DRONE_CESIUM_ION_TOKEN to add terrain relief later.', 'warn');
+  }
+  return {
+    Cesium: Cesium,
+    viewer: viewer,
+    terrainMode: prepared.terrainMode,
+    buildingsLoaded: buildingsLoaded,
+  };
+}
+
+async function loadDrone3DScene(droneId, options) {
+  if (drone3dFetchInFlight) return;
+  drone3dFetchInFlight = true;
+  try {
+    var res = await fetch('/api/drones/' + encodeURIComponent(droneId) + '/scene-3d');
+    var scene = await res.json().catch(function() { return {}; });
+    if (!res.ok) {
+      throw new Error(scene.error || 'Failed to build the 3D scene.');
     }
+    setDrone3DMeta(scene);
+    var radiusKm = Number(scene.scene && scene.scene.radius_km || 5).toFixed(0);
+    document.getElementById('drone3dSubtitle').textContent =
+      radiusKm + ' km terrain-following map around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Terrain, buildings, and nearby airspace refresh while the drone is live.';
+    var rendered = await renderDrone3DScene(scene, options || {});
+    if (rendered.terrainMode === 'ion' && rendered.buildingsLoaded) {
+      drone3dStatus('Live 3D map loaded with terrain, OSM buildings, and a 5 km operating region around the drone.', 'ok');
+    } else if (rendered.terrainMode === 'ion') {
+      drone3dStatus('Live 3D map loaded with terrain. Building tiles are unavailable for this session.', 'warn');
+    } else {
+      drone3dStatus('3D map loaded with imagery only. Set DRONE_CESIUM_ION_TOKEN to unlock terrain relief and 3D buildings.', 'warn');
+    }
+  } finally {
+    drone3dFetchInFlight = false;
+  }
+}
+
+function startDrone3DRefresh(droneId, intervalSeconds) {
+  if (drone3dRefreshTimer) {
+    clearInterval(drone3dRefreshTimer);
+  }
+  drone3dRefreshTimer = setInterval(function() {
+    if (!drone3dActiveDroneId) return;
+    loadDrone3DScene(droneId, { flyTo: false }).catch(function(err) {
+      drone3dStatus(err && err.message ? err.message : '3D scene refresh failed.', 'warn');
+    });
+  }, Math.max(Number(intervalSeconds || 5), 3) * 1000);
+}
+
+async function openDrone3D(droneId) {
+  if (!authenticatedUser || !droneId) return;
+  drone3dActiveDroneId = droneId;
+  document.getElementById('drone3dOverlay').style.display = 'block';
+  drone3dStatus('Loading terrain, buildings, and live airspace around the selected drone...', 'info');
+  try {
+    await loadDrone3DScene(droneId, { flyTo: true });
+    startDrone3DRefresh(droneId, 5);
   } catch (err) {
     drone3dStatus(err && err.message ? err.message : '3D scene failed to load.', 'error');
   }
@@ -3824,7 +3994,7 @@ def _build_drone_3d_scene(drone_id: str, *, owner_email: str | None, admin_view:
     return DRONE_3D_SCENE_SERVICE.build_scene(
         drone_id,
         owner_email=owner_email,
-        radius_km=10.0,
+        radius_km=5.0,
         admin_view=admin_view,
     )
 

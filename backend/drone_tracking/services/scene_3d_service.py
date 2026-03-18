@@ -38,6 +38,19 @@ def _zone_color(category: str) -> str:
     return '#8b949e'
 
 
+def _region_bounds(lat: float, lon: float, *, radius_m: float) -> dict[str, float]:
+    north_lat, _ = _offset_point(lat, lon, distance_m=radius_m, bearing_deg=0.0)
+    south_lat, _ = _offset_point(lat, lon, distance_m=radius_m, bearing_deg=180.0)
+    _, east_lon = _offset_point(lat, lon, distance_m=radius_m, bearing_deg=90.0)
+    _, west_lon = _offset_point(lat, lon, distance_m=radius_m, bearing_deg=270.0)
+    return {
+        'min_latitude': min(south_lat, north_lat),
+        'max_latitude': max(south_lat, north_lat),
+        'min_longitude': min(west_lon, east_lon),
+        'max_longitude': max(west_lon, east_lon),
+    }
+
+
 class Drone3DSceneService:
     def __init__(self, *, drone_repo, airspace_query_service, cesium_ion_token: str = ''):
         self.drone_repo = drone_repo
@@ -98,7 +111,7 @@ class Drone3DSceneService:
         drone_id: str,
         *,
         owner_email: str | None,
-        radius_km: float = 10.0,
+        radius_km: float = 5.0,
         admin_view: bool = False,
     ) -> dict[str, Any]:
         focus_drone = self.drone_repo.get_live_drone(
@@ -113,6 +126,8 @@ class Drone3DSceneService:
         focus_lat = float(focus_drone['latitude'])
         focus_lon = float(focus_drone['longitude'])
         radius_km = max(1.0, min(float(radius_km), 25.0))
+        radius_m = radius_km * 1000.0
+        region_bounds = _region_bounds(focus_lat, focus_lon, radius_m=radius_m)
 
         all_live = self.drone_repo.list_live_drones(owner_email=None, include_upcoming=False, only_ongoing=True)
         nearby_aircraft = []
@@ -153,15 +168,37 @@ class Drone3DSceneService:
             'zones': zones,
             'scene': {
                 'radius_km': radius_km,
+                'focus_region': {
+                    'shape': 'circle',
+                    'center_latitude': focus_lat,
+                    'center_longitude': focus_lon,
+                    'radius_m': radius_m,
+                    'bounds': region_bounds,
+                },
                 'terrain': {
                     'provider': 'ion' if self.cesium_ion_token else 'ellipsoid',
                     'ion_enabled': bool(self.cesium_ion_token),
                     'ion_token': self.cesium_ion_token,
                 },
+                'imagery': {
+                    'provider': 'openstreetmap',
+                    'url': 'https://tile.openstreetmap.org/',
+                    'attribution': '(c) OpenStreetMap contributors',
+                    'kind': 'street',
+                },
+                'buildings': {
+                    'provider': 'cesium_osm_buildings' if self.cesium_ion_token else 'none',
+                    'ion_enabled': bool(self.cesium_ion_token),
+                    'source': 'openstreetmap',
+                },
+                'follow': {
+                    'mode': 'tracked_entity',
+                    'refresh_interval_s': 5,
+                },
                 'camera': {
                     'latitude': focus_lat,
                     'longitude': focus_lon,
-                    'altitude_m': max(float(focus_drone.get('altitude') or 0.0) + 900.0, 900.0),
+                    'altitude_m': max(float(focus_drone.get('altitude') or 0.0) + radius_m * 0.42, 1800.0),
                     'heading_deg': float(focus_drone.get('heading') or 0.0),
                     'pitch_deg': -35.0,
                 },
@@ -170,6 +207,25 @@ class Drone3DSceneService:
                     'zone_limit': len(zones),
                     'obstacle_limit': 6,
                     'nearby_aircraft_limit': len(nearby_aircraft),
+                    'terrain_shadows': bool(self.cesium_ion_token),
+                    'building_layer_enabled': bool(self.cesium_ion_token),
                 },
+                'data_sources': [
+                    {
+                        'name': 'Cesium World Terrain',
+                        'type': 'terrain',
+                        'enabled': bool(self.cesium_ion_token),
+                    },
+                    {
+                        'name': 'Cesium OSM Buildings',
+                        'type': 'buildings',
+                        'enabled': bool(self.cesium_ion_token),
+                    },
+                    {
+                        'name': 'OpenStreetMap Raster Tiles',
+                        'type': 'imagery',
+                        'enabled': True,
+                    },
+                ],
             },
         }

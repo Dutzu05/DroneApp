@@ -91,16 +91,20 @@ Start server:
 ## 3D Drone View
 - The 2D Leaflet map remains the primary interface.
 - A lazy-loaded Cesium 3D view can be opened from an active drone card with `3D view`.
-- The 3D scene is built from:
+- The 3D scene now builds a dedicated `5 km` operating region around the active drone and refreshes while the drone remains live.
+- The 3D map is built from:
+  - Cesium World Terrain when `DRONE_CESIUM_ION_TOKEN` is configured
+  - Cesium OSM Buildings for real 3D structures around the drone when terrain credentials are available
+  - OpenStreetMap imagery tiles as the basemap
   - the selected drone and its recent telemetry track
-  - nearby ongoing aircraft within `10 km`
+  - nearby ongoing aircraft within the same `5 km` region
   - nearby airspace zones rendered as extruded blocks
-  - mock obstacles rendered around the focused drone
+  - supplemental mock obstacles rendered around the focused drone
 - New backend endpoint:
   - `GET /api/drones/<drone_id>/scene-3d`
 - Optional terrain relief token:
   - env var `DRONE_CESIUM_ION_TOKEN`
-- If `DRONE_CESIUM_ION_TOKEN` is not set, 3D still works with an ellipsoid globe but without remote terrain relief.
+- If `DRONE_CESIUM_ION_TOKEN` is not set, 3D still opens with imagery and airspace, but terrain relief and OSM 3D buildings stay disabled.
 
 ## Backend Architecture
 - The backend is still a modular monolith, but auth and flight-plan orchestration now live under `modules/`
