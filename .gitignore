@@ -2,12 +2,20 @@
 .tooling/
 .postgres/
 .data/
+.npm-cache/
+.pip-cache/
+.tmp/
+.gitconfig.codex
 
 # Python
 __pycache__/
 *.pyc
 venv/
+.venv/
 .env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Flutter / Dart standard ignores
 .dart_tool/
@@ -25,7 +33,12 @@ htmlcov/
 android/local.properties
 ios/Flutter/App.framework
 ios/Flutter/Flutter.framework
+mobile_app/.idea/
 
 # System junk
 .DS_Store
 Thumbs.db
+
+# Local scratch files
+tmp_inline_check.js
+tmp_rendered_inline.js

@@ -4,6 +4,10 @@
 .tooling/
 .postgres/
 .data/
+.npm-cache/
+.pip-cache/
+.tmp/
+.gitconfig.codex
 __pycache__/
 *.pyc
 mobile_app/.dart_tool/

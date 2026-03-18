@@ -15,6 +15,21 @@
 3. `scripts/init-db.sh`
 4. `flutter --version`
 
+## Windows Quick Start
+1. Open a new PowerShell window after installing Docker Desktop, Git, and Node.js so the updated `PATH` is picked up.
+2. Load the project environment:
+   `.\scripts\dev-env.ps1`
+3. Start the Docker stack:
+   `.\scripts\docker-compose.ps1 up --build`
+4. In a second PowerShell window, load the environment again and resolve Flutter packages:
+   `.\scripts\dev-env.ps1`
+   `Set-Location mobile_app`
+   `& ..\.tooling\flutter\bin\flutter.bat pub get`
+
+Notes:
+- If Flutter reports that plugin builds require symlink support, enable Windows Developer Mode and restart your terminal.
+- The Windows flow uses Docker Compose for PostgreSQL/PostGIS instead of the Bash-only local socket scripts.
+
 ## DB Connection
 - `PGHOST=/home/vlad/Projects/Drone/.postgres/run`
 - `PGPORT=5433`
@@ -111,6 +126,7 @@ Start server:
 ### Run with Docker Compose
 1. Set `DRONE_GOOGLE_WEB_CLIENT_ID`
 2. Run `docker compose up --build`
+   On Windows, if `docker` is not recognized in your current shell, use `.\scripts\docker-compose.ps1 up --build` or open a fresh PowerShell window after Docker Desktop installation.
 3. Open `http://localhost:5174/`
 
 ## Airspace Backend
@@ -142,6 +158,7 @@ Start server:
 ## Testing
 - Unit test runner:
   - `./scripts/run-unit-tests.sh`
+  - Windows: `.\scripts\run-unit-tests.ps1`
 - PostGIS ingestion smoke:
   - `./scripts/run-airspace-compose-smoke.sh`
 - Drone telemetry compose smoke:
