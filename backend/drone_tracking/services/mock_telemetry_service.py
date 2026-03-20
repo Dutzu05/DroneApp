@@ -50,8 +50,8 @@ class DroneMockTelemetryService:
         lon_scale = max(math.cos(math.radians(center_lat)), 0.3)
 
         if runtime_state == 'ongoing':
-            orbit_radius_lon_deg = min(max(radius_lon_m * 0.35, 25.0), 100.0) / (111_320.0 * lon_scale)
-            orbit_radius_lat_deg = min(max(radius_lat_m * 0.35, 25.0), 100.0) / 111_320.0
+            orbit_radius_lon_deg = min(max(radius_lon_m * 0.35, 25.0), 260.0) / (111_320.0 * lon_scale)
+            orbit_radius_lat_deg = min(max(radius_lat_m * 0.35, 25.0), 260.0) / 111_320.0
             longitude = center_lon + math.cos(phase / 1.8) * orbit_radius_lon_deg
             latitude = center_lat + math.sin(phase / 1.8) * orbit_radius_lat_deg
             altitude = min(max_altitude, max(18.0, max_altitude * 0.72 + math.sin(phase / 3.0) * 6.0))

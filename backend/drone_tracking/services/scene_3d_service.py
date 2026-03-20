@@ -4,6 +4,8 @@ import hashlib
 import math
 from typing import Any
 
+from backend.airspace.validators.geometry_validator import GeometryValidationError, validate_geometry
+
 
 def _meters_per_lon_degree(lat: float) -> float:
     return max(math.cos(math.radians(lat)), 0.25) * 111_320.0
@@ -23,6 +25,37 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
     return 2.0 * radius_m * math.asin(math.sqrt(a))
+
+
+def _simplify_ring(ring: list[list[float]], *, max_points: int) -> list[list[float]]:
+    if len(ring) <= max_points:
+        return ring
+    step = max(1, math.ceil((len(ring) - 1) / max(max_points - 1, 1)))
+    simplified = ring[::step]
+    if ring[-1] != simplified[-1]:
+        simplified.append(ring[-1])
+    if simplified[0] != simplified[-1]:
+        simplified.append(simplified[0])
+    return simplified
+
+
+def _simplify_geometry(geometry: dict[str, Any], *, max_ring_points: int = 80) -> dict[str, Any]:
+    geometry_type = geometry.get('type')
+    coordinates = geometry.get('coordinates') or []
+    if geometry_type == 'Polygon':
+        return {
+            **geometry,
+            'coordinates': [_simplify_ring(ring, max_points=max_ring_points) for ring in coordinates],
+        }
+    if geometry_type == 'MultiPolygon':
+        return {
+            **geometry,
+            'coordinates': [
+                [_simplify_ring(ring, max_points=max_ring_points) for ring in polygon]
+                for polygon in coordinates
+            ],
+        }
+    return geometry
 
 
 def _zone_color(category: str) -> str:
@@ -88,7 +121,12 @@ class Drone3DSceneService:
             )
         return obstacles
 
-    def _normalize_zone(self, zone: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_zone(self, zone: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            geometry = _simplify_geometry(validate_geometry(dict(zone.get('geometry') or {})))
+        except (GeometryValidationError, TypeError, ValueError):
+            return None
+
         lower_m = float(zone.get('lower_altitude_m') or 0.0)
         upper_raw = zone.get('upper_altitude_m')
         upper_m = float(upper_raw) if upper_raw is not None else max(lower_m + 120.0, 120.0)
@@ -99,7 +137,7 @@ class Drone3DSceneService:
             'source': zone.get('source'),
             'name': zone.get('name'),
             'category': zone.get('category'),
-            'geometry': zone.get('geometry'),
+            'geometry': geometry,
             'distance_m': float(zone.get('distance_m') or 0.0),
             'lower_altitude_m': lower_m,
             'upper_altitude_m': upper_m,
@@ -155,7 +193,14 @@ class Drone3DSceneService:
             radius_km=radius_km,
             categories={'ctr', 'tma', 'notam', 'restricted'},
         )
-        zones = [self._normalize_zone(zone) for zone in zones_response.get('zones', [])]
+        zones = sorted(
+            (
+                normalized
+                for normalized in (self._normalize_zone(zone) for zone in zones_response.get('zones', []))
+                if normalized is not None
+            ),
+            key=lambda item: (float(item.get('distance_m') or 0.0), float(item.get('lower_altitude_m') or 0.0)),
+        )[:18]
         track = self.drone_repo.telemetry_history(drone_id, limit=40)
 
         return {
@@ -209,6 +254,9 @@ class Drone3DSceneService:
                     'nearby_aircraft_limit': len(nearby_aircraft),
                     'terrain_shadows': bool(self.cesium_ion_token),
                     'building_layer_enabled': bool(self.cesium_ion_token),
+                    'airspace_volumes_default_visible': True,
+                    'airspace_altitude_mode': 'relative_to_ground_visual',
+                    'airspace_volume_max_altitude_m': 6000.0,
                 },
                 'data_sources': [
                     {

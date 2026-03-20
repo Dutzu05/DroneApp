@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from shapely.geometry import LinearRing, MultiPolygon, Polygon, mapping, shape
@@ -12,6 +13,34 @@ class GeometryValidationError(ValueError):
 
 
 SUPPORTED_TYPES = {'Polygon', 'MultiPolygon'}
+_WEB_MERCATOR_HALF_WORLD = 20037508.34
+
+
+def _web_mercator_to_lng_lat(x: float, y: float) -> tuple[float, float]:
+    lng = (x / _WEB_MERCATOR_HALF_WORLD) * 180.0
+    lat = (y / _WEB_MERCATOR_HALF_WORLD) * 180.0
+    lat = 180.0 / math.pi * (2.0 * math.atan(math.exp(lat * math.pi / 180.0)) - math.pi / 2.0)
+    return lng, lat
+
+
+def _normalize_position(position: list[float]) -> list[float]:
+    if len(position) < 2:
+        raise GeometryValidationError('Coordinate must contain longitude and latitude.')
+
+    x = float(position[0])
+    y = float(position[1])
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise GeometryValidationError('Coordinate must be finite.')
+
+    if abs(x) > 180.0 or abs(y) > 90.0:
+        if abs(x) > _WEB_MERCATOR_HALF_WORLD or abs(y) > _WEB_MERCATOR_HALF_WORLD:
+            raise GeometryValidationError('Coordinate is outside supported WGS84 and Web Mercator bounds.')
+        x, y = _web_mercator_to_lng_lat(x, y)
+
+    if abs(x) > 180.0 or abs(y) > 90.0:
+        raise GeometryValidationError('Coordinate is outside WGS84 bounds after normalization.')
+
+    return [x, y]
 
 
 def _close_ring(ring: list[list[float]]) -> list[list[float]]:
@@ -25,7 +54,7 @@ def _close_ring(ring: list[list[float]]) -> list[list[float]]:
 
 
 def _normalize_polygon_coordinates(coords: list[list[list[float]]]) -> list[list[list[float]]]:
-    return [_close_ring([[float(pair[0]), float(pair[1])] for pair in ring]) for ring in coords]
+    return [_close_ring([_normalize_position(pair) for pair in ring]) for ring in coords]
 
 
 def validate_geometry(geometry: dict[str, Any]) -> dict[str, Any]:

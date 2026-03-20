@@ -1196,6 +1196,9 @@ HTML = b"""<!DOCTYPE html>
   }
   .drone3d-head h2 { font-size: 1rem; color: #d7ecff; margin-bottom: 4px; }
   .drone3d-head .sub { color: var(--muted); font-size: .77rem; line-height: 1.45; }
+  .drone3d-head-actions {
+    display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap;
+  }
   .drone3d-close {
     border: 1px solid var(--border); border-radius: 999px; background: transparent;
     color: var(--text); padding: 7px 12px; cursor: pointer; font-weight: 700;
@@ -1333,12 +1336,15 @@ HTML = b"""<!DOCTYPE html>
         <h2>3D Drone View</h2>
         <div class="sub" id="drone3dSubtitle">Lazy-loaded Cesium scene around the active drone. 2D map remains unchanged underneath.</div>
       </div>
-      <button class="drone3d-close" type="button" onclick="closeDrone3D()">Close 3D</button>
+      <div class="drone3d-head-actions">
+        <button class="drone3d-close" type="button" onclick="refreshDrone3DAirspaces()">Refresh Airspace</button>
+        <button class="drone3d-close" type="button" onclick="closeDrone3D()">Close 3D</button>
+      </div>
     </div>
     <div class="drone3d-meta" id="drone3dMeta">
       <div class="drone3d-metric"><div class="label">Drone</div><div class="value">-</div></div>
       <div class="drone3d-metric"><div class="label">Terrain</div><div class="value">-</div></div>
-      <div class="drone3d-metric"><div class="label">Airspace Blocks</div><div class="value">-</div></div>
+      <div class="drone3d-metric"><div class="label">Airspace Volumes</div><div class="value">-</div></div>
       <div class="drone3d-metric"><div class="label">Nearby Aircraft</div><div class="value">-</div></div>
     </div>
     <div class="drone3d-stage">
@@ -1387,6 +1393,9 @@ let drone3dBuildingsTileset = null;
 let drone3dRefreshTimer = null;
 let drone3dActiveDroneId = '';
 let drone3dFetchInFlight = false;
+let drone3dLastScene = null;
+let drone3dRenderedZoneSignature = '';
+let drone3dZonesVisible = false;
 const CENTER_BLOCKING_LAYER_KEYS = ['ctr', 'uas_zones', 'notam', 'tma'];
 
 function setMyPlansContent(html) {
@@ -1481,15 +1490,67 @@ function drone3dStatus(message, kind) {
 function setDrone3DMeta(scene) {
   var buildingsProvider = scene.scene && scene.scene.buildings && scene.scene.buildings.provider ? scene.scene.buildings.provider : 'none';
   var imageryProvider = scene.scene && scene.scene.imagery && scene.scene.imagery.provider ? scene.scene.imagery.provider : '-';
+  var zoneCount = (scene.zones || []).length;
   var metrics = [
     { label: 'Drone', value: (scene.drone && scene.drone.drone_id) || '-' },
     { label: 'Radius', value: String(Number(scene.scene && scene.scene.radius_km || 0).toFixed(0)) + ' km' },
     { label: 'Surface', value: imageryProvider + ' + ' + buildingsProvider },
+    { label: 'Airspace Volumes', value: String(zoneCount) + ' visible' },
     { label: 'Nearby Aircraft', value: String((scene.nearby_aircraft || []).length) },
   ];
   document.getElementById('drone3dMeta').innerHTML = metrics.map(function(item) {
     return '<div class="drone3d-metric"><div class="label">' + item.label + '</div><div class="value">' + item.value + '</div></div>';
   }).join('');
+}
+
+function zoneSceneSignature(scene) {
+  return (scene && scene.zones ? scene.zones : []).map(function(zone) {
+    var geometry = zone.geometry || {};
+    var coords = geometry.coordinates || [];
+    return [
+      String(zone.zone_id || ''),
+      String(zone.lower_altitude_m || ''),
+      String(zone.upper_altitude_m || ''),
+      String(zone.category || ''),
+      String(geometry.type || ''),
+      String(JSON.stringify(coords).length),
+    ].join(':');
+  }).join('|');
+}
+
+function clearDrone3DAirspaces(viewer) {
+  if (!viewer) return;
+  removeDrone3DEntities(viewer, ['zone:']);
+  drone3dRenderedZoneSignature = '';
+  drone3dZonesVisible = false;
+}
+
+function syncDrone3DAirspaces(CesiumRef, viewerRef, sceneRef, forceRender) {
+  var Cesium = CesiumRef || window.Cesium;
+  var viewer = viewerRef || drone3dViewer;
+  var scene = sceneRef || drone3dLastScene;
+  if (!viewer) return;
+  var signature = zoneSceneSignature(scene);
+  if (!Cesium || !scene || !scene.zones || !scene.zones.length) {
+    clearDrone3DAirspaces(viewer);
+  } else if (forceRender || !drone3dZonesVisible || drone3dRenderedZoneSignature !== signature) {
+    clearDrone3DAirspaces(viewer);
+    renderZones3D(Cesium, viewer, scene.zones, scene);
+    drone3dRenderedZoneSignature = signature;
+    drone3dZonesVisible = true;
+  }
+  if (viewer.scene && typeof viewer.scene.requestRender === 'function') {
+    viewer.scene.requestRender();
+  }
+  if (scene) {
+    setDrone3DMeta(scene);
+  }
+}
+
+function refreshDrone3DAirspaces() {
+  if (!window.Cesium || !drone3dViewer || !drone3dLastScene) return;
+  syncDrone3DAirspaces(window.Cesium, drone3dViewer, drone3dLastScene, true);
+  drone3dStatus('Airspace volumes refreshed for the current 3D scene.', 'info');
 }
 
 function closeDrone3D() {
@@ -1500,6 +1561,7 @@ function closeDrone3D() {
   drone3dActiveDroneId = '';
   if (drone3dViewer) {
     drone3dViewer.trackedEntity = undefined;
+    clearDrone3DAirspaces(drone3dViewer);
   }
   document.getElementById('drone3dOverlay').style.display = 'none';
 }
@@ -1581,6 +1643,7 @@ async function ensureDrone3DViewer(scene) {
   }
   if (!drone3dViewer || drone3dTerrainMode !== requestedTerrain || drone3dImageryMode !== requestedImagery) {
     if (drone3dViewer) {
+      clearDrone3DAirspaces(drone3dViewer);
       drone3dViewer.destroy();
       drone3dViewer = null;
       drone3dBuildingsTileset = null;
@@ -1626,6 +1689,24 @@ async function ensureDrone3DViewer(scene) {
     drone3dViewer.scene.globe.enableLighting = requestedTerrain === 'ion';
     drone3dViewer.scene.skyAtmosphere.show = true;
     drone3dViewer.shadows = requestedTerrain === 'ion';
+    var controller = drone3dViewer.scene.screenSpaceCameraController;
+    controller.enableRotate = true;
+    controller.enableTranslate = true;
+    controller.enableZoom = true;
+    controller.enableTilt = true;
+    controller.enableLook = true;
+    controller.inertiaSpin = 0.12;
+    controller.inertiaTranslate = 0.12;
+    controller.inertiaZoom = 0.08;
+    controller.minimumZoomDistance = 12;
+    controller.maximumZoomDistance = 2500000;
+    controller.rotateEventTypes = [Cesium.CameraEventType.LEFT_DRAG];
+    controller.translateEventTypes = [Cesium.CameraEventType.MIDDLE_DRAG];
+    controller.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.RIGHT_DRAG];
+    controller.tiltEventTypes = [
+      { eventType: Cesium.CameraEventType.MIDDLE_DRAG, modifier: Cesium.KeyboardEventModifier.CTRL },
+      { eventType: Cesium.CameraEventType.LEFT_DRAG, modifier: Cesium.KeyboardEventModifier.CTRL },
+    ];
     drone3dTerrainMode = requestedTerrain;
     drone3dImageryMode = requestedImagery;
   }
@@ -1659,6 +1740,14 @@ function droneBillboardImage() {
       '<circle cx="32" cy="32" r="18" fill="#08111c" fill-opacity="0.78" stroke="#d7ecff" stroke-width="3"/>' +
       '<circle cx="32" cy="32" r="8.5" fill="#58a6ff" stroke="#ffffff" stroke-width="2"/>' +
       '<path d="M32 12 V18 M32 46 V52 M12 32 H18 M46 32 H52" stroke="#d7ecff" stroke-width="2.5" stroke-linecap="round"/>' +
+    '</svg>'
+  );
+}
+
+function droneHeadingTipImage() {
+  return 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">' +
+      '<path d="M20 3 L34 30 H24 L24 37 H16 L16 30 H6 Z" fill="#9ce7ff" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>' +
     '</svg>'
   );
 }
@@ -1709,34 +1798,67 @@ async function resolveDronePose(Cesium, viewer, drone, scene) {
 
 function renderDroneHeadingIndicator(Cesium, viewer, drone, pose) {
   var entity = viewer.entities.getById('focus-drone-heading');
-  if (!pose || !pose.sampledTerrain) {
+  var tipEntity = viewer.entities.getById('focus-drone-heading-tip');
+  if (!pose || !pose.position) {
     if (entity) viewer.entities.remove(entity);
+    if (tipEntity) viewer.entities.remove(tipEntity);
     return;
   }
+  var arrowLength = Math.max(Number(drone.speed || 0) * 10.0, 120.0);
   var target = offsetPoint(
     Number(drone.latitude || 0),
     Number(drone.longitude || 0),
-    Math.max(Number(drone.speed || 0) * 7.5, 70),
+    arrowLength,
     Number(drone.heading || 0)
+  );
+  var arrowAltitude = pose.sampledTerrain
+    ? Math.max(pose.absoluteHeight, pose.groundHeight + 45)
+    : Math.max(Number(drone.altitude || 0), 45);
+  var targetPosition = Cesium.Cartesian3.fromDegrees(
+    Number(target.longitude || 0),
+    Number(target.latitude || 0),
+    arrowAltitude
   );
   var arrow = {
     positions: [
       pose.position,
-      Cesium.Cartesian3.fromDegrees(Number(target.longitude || 0), Number(target.latitude || 0), pose.absoluteHeight),
+      targetPosition,
     ],
-    width: 6,
+    width: 8,
     material: new Cesium.PolylineArrowMaterialProperty(
       Cesium.Color.fromCssColorString('#8cd6ff').withAlpha(0.96)
     ),
+    depthFailMaterial: Cesium.Color.fromCssColorString('#dff8ff').withAlpha(0.96),
   };
   if (entity) {
     entity.polyline = arrow;
-    return;
+  } else {
+    viewer.entities.add({
+      id: 'focus-drone-heading',
+      polyline: arrow,
+    });
   }
-  viewer.entities.add({
-    id: 'focus-drone-heading',
-    polyline: arrow,
-  });
+  var tipState = {
+    position: targetPosition,
+    billboard: {
+      image: droneHeadingTipImage(),
+      width: 24,
+      height: 24,
+      rotation: Cesium.Math.toRadians(Number(drone.heading || 0)),
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      scaleByDistance: new Cesium.NearFarScalar(250, 1.0, 24000, 0.78),
+      eyeOffset: new Cesium.Cartesian3(0, 0, 120),
+    },
+  };
+  if (tipEntity) {
+    tipEntity.position = tipState.position;
+    tipEntity.billboard = tipState.billboard;
+  } else {
+    viewer.entities.add(Object.assign({ id: 'focus-drone-heading-tip' }, tipState));
+  }
+  if (viewer.scene && typeof viewer.scene.requestRender === 'function') {
+    viewer.scene.requestRender();
+  }
 }
 
 function renderDroneAltitudeAnchor(Cesium, viewer, drone, pose) {
@@ -1761,6 +1883,9 @@ function renderDroneAltitudeAnchor(Cesium, viewer, drone, pose) {
     id: 'focus-drone-anchor',
     polyline: anchor,
   });
+  if (viewer.scene && typeof viewer.scene.requestRender === 'function') {
+    viewer.scene.requestRender();
+  }
 }
 
 function renderOperationalRegion(Cesium, viewer, scene, drone) {
@@ -1941,45 +2066,173 @@ function renderObstacles(Cesium, viewer, obstacles) {
   });
 }
 
-function renderZones3D(Cesium, viewer, zones) {
-  removeDrone3DEntities(viewer, ['zone:']);
-  (zones || []).forEach(function(zone, zoneIndex) {
+function airspaceGroundVisualOffset(Cesium, viewer, scene) {
+  var altitudeMode = scene && scene.scene && scene.scene.rendering && scene.scene.rendering.airspace_altitude_mode
+    ? scene.scene.rendering.airspace_altitude_mode
+    : 'absolute';
+  if (altitudeMode !== 'relative_to_ground_visual') return 0;
+  if (!Cesium || !viewer || !viewer.scene || !viewer.scene.globe || typeof viewer.scene.globe.getHeight !== 'function') return 0;
+  var latitude = Number(scene && scene.drone && scene.drone.latitude);
+  var longitude = Number(scene && scene.drone && scene.drone.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return 0;
+  try {
+    var groundHeight = Number(viewer.scene.globe.getHeight(Cesium.Cartographic.fromDegrees(longitude, latitude)));
+    if (Number.isFinite(groundHeight)) {
+      return Math.max(groundHeight, 0) + 60.0;
+    }
+  } catch (err) {}
+  return 60.0;
+}
+
+function zoneAltitudeRange(zone, scene, Cesium, viewer) {
+  var relativeLower = Math.max(Number(zone.lower_altitude_m || 0), 0);
+  var fallbackUpper = Math.max(relativeLower + 120, 120);
+  var relativeUpper = Number(zone.upper_altitude_m || fallbackUpper);
+  var maxUpper = Number(scene && scene.scene && scene.scene.rendering && scene.scene.rendering.airspace_volume_max_altitude_m || 6000);
+  var baseOffset = airspaceGroundVisualOffset(Cesium, viewer, scene);
+  if (!Number.isFinite(relativeUpper)) relativeUpper = fallbackUpper;
+  if (relativeUpper <= relativeLower) relativeUpper = relativeLower + 60;
+  relativeUpper = Math.min(relativeUpper, maxUpper);
+  if (relativeUpper <= relativeLower) relativeLower = Math.max(0, relativeUpper - 60);
+  var lower = relativeLower + baseOffset;
+  var upper = relativeUpper + baseOffset;
+  if (upper <= lower + 40) upper = lower + 40;
+  return { lower: lower, upper: upper, baseOffset: baseOffset };
+}
+
+function zoneRenderStyle(Cesium, zone) {
+  var category = String(zone.category || '').toLowerCase();
+  var color = zone.color || '#58a6ff';
+  var fillAlpha = 0.22;
+  var outlineAlpha = 0.96;
+  if (category === 'restricted') {
+    fillAlpha = 0.28;
+    outlineAlpha = 0.98;
+  } else if (category === 'temporary_restriction') {
+    fillAlpha = 0.24;
+    outlineAlpha = 0.96;
+  } else if (category === 'tma') {
+    fillAlpha = 0.18;
+    outlineAlpha = 0.92;
+  }
+  return {
+    material: zoneColor(Cesium, color, fillAlpha),
+    outlineColor: zoneColor(Cesium, color, outlineAlpha),
+  };
+}
+
+function ringPositionsAtHeight(Cesium, ring, height) {
+  return (ring || []).map(function(coord) {
+    return Cesium.Cartesian3.fromDegrees(Number(coord[0]), Number(coord[1]), height);
+  });
+}
+
+function addZonePolylineOutline(Cesium, viewer, id, positions, color, width) {
+  if (!positions || positions.length < 2) return;
+  viewer.entities.add({
+    id: id,
+    polyline: {
+      positions: positions,
+      width: width,
+      material: color,
+      depthFailMaterial: color,
+      clampToGround: false,
+    },
+  });
+}
+
+function addZoneVerticalEdges(Cesium, viewer, idPrefix, ring, range, color) {
+  var usablePoints = Math.max((ring || []).length - 1, 0);
+  if (!usablePoints) return;
+  var step = Math.max(1, Math.floor(usablePoints / 6));
+  for (var index = 0; index < usablePoints; index += step) {
+    var coord = ring[index];
+    if (!coord) continue;
+    addZonePolylineOutline(
+      Cesium,
+      viewer,
+      idPrefix + ':edge:' + String(index),
+      [
+        Cesium.Cartesian3.fromDegrees(Number(coord[0]), Number(coord[1]), range.lower),
+        Cesium.Cartesian3.fromDegrees(Number(coord[0]), Number(coord[1]), range.upper),
+      ],
+      color,
+      2.5
+    );
+  }
+}
+
+function addZoneShellOverlays(Cesium, viewer, idPrefix, rings, range, style) {
+  (rings || []).forEach(function(ring, ringIndex) {
+    if (!ring || ring.length < 2) return;
+    var ringPrefix = idPrefix + ':ring:' + String(ringIndex);
+    addZonePolylineOutline(
+      Cesium,
+      viewer,
+      ringPrefix + ':top',
+      ringPositionsAtHeight(Cesium, ring, range.upper),
+      style.outlineColor,
+      4
+    );
+    addZonePolylineOutline(
+      Cesium,
+      viewer,
+      ringPrefix + ':bottom',
+      ringPositionsAtHeight(Cesium, ring, range.lower),
+      style.outlineColor,
+      2.5
+    );
+    addZoneVerticalEdges(Cesium, viewer, ringPrefix, ring, range, style.outlineColor);
+  });
+}
+
+function buildZonePolygon(Cesium, hierarchy, range, style) {
+  return {
+    hierarchy: hierarchy,
+    height: range.lower,
+    extrudedHeight: range.upper,
+    material: style.material,
+    outline: true,
+    outlineColor: style.outlineColor,
+    closeTop: true,
+    closeBottom: false,
+    perPositionHeight: false,
+    arcType: Cesium.ArcType.GEODESIC,
+  };
+}
+
+function renderZones3D(Cesium, viewer, zones, scene) {
+  (zones || []).slice().sort(function(left, right) {
+    var leftRange = zoneAltitudeRange(left, scene, Cesium, viewer);
+    var rightRange = zoneAltitudeRange(right, scene, Cesium, viewer);
+    if (leftRange.lower !== rightRange.lower) return leftRange.lower - rightRange.lower;
+    if (leftRange.upper !== rightRange.upper) return leftRange.upper - rightRange.upper;
+    return String(left.name || left.zone_id || '').localeCompare(String(right.name || right.zone_id || ''));
+  }).forEach(function(zone, zoneIndex) {
     var geometry = zone.geometry || {};
-    var lower = Number(zone.lower_altitude_m || 0);
-    var upper = Number(zone.upper_altitude_m || Math.max(lower + 60, 120));
-    var material = zoneColor(Cesium, zone.color || '#58a6ff', 0.16);
-    var outlineColor = zoneColor(Cesium, zone.color || '#58a6ff', 0.74);
+    var range = zoneAltitudeRange(zone, scene, Cesium, viewer);
+    var style = zoneRenderStyle(Cesium, zone);
     if (geometry.type === 'Polygon') {
-      var hierarchy = polygonHierarchyFromRings(Cesium, geometry.coordinates || [], lower);
+      var hierarchy = polygonHierarchyFromRings(Cesium, geometry.coordinates || [], range.lower);
       if (!hierarchy) return;
+      var zoneId = 'zone:' + String(zone.zone_id || zoneIndex);
       viewer.entities.add({
-        id: 'zone:' + String(zone.zone_id || zoneIndex),
-        polygon: {
-          hierarchy: hierarchy,
-          height: lower,
-          extrudedHeight: upper,
-          material: material,
-          outline: true,
-          outlineColor: outlineColor,
-        },
+        id: zoneId,
+        polygon: buildZonePolygon(Cesium, hierarchy, range, style),
       });
+      addZoneShellOverlays(Cesium, viewer, zoneId, geometry.coordinates || [], range, style);
       return;
     }
     if (geometry.type === 'MultiPolygon') {
       (geometry.coordinates || []).forEach(function(polygonRings, polygonIndex) {
-        var hierarchy = polygonHierarchyFromRings(Cesium, polygonRings || [], lower);
+        var hierarchy = polygonHierarchyFromRings(Cesium, polygonRings || [], range.lower);
         if (!hierarchy) return;
+        var polygonId = 'zone:' + String(zone.zone_id || zoneIndex) + ':' + String(polygonIndex);
         viewer.entities.add({
-          id: 'zone:' + String(zone.zone_id || zoneIndex) + ':' + String(polygonIndex),
-          polygon: {
-            hierarchy: hierarchy,
-            height: lower,
-            extrudedHeight: upper,
-            material: material,
-            outline: true,
-            outlineColor: outlineColor,
-          },
+          id: polygonId,
+          polygon: buildZonePolygon(Cesium, hierarchy, range, style),
         });
+        addZoneShellOverlays(Cesium, viewer, polygonId, polygonRings || [], range, style);
       });
     }
   });
@@ -2024,14 +2277,17 @@ async function renderDrone3DScene(scene, options) {
   var prepared = await ensureDrone3DViewer(scene);
   var Cesium = prepared.Cesium;
   var viewer = prepared.viewer;
+  drone3dLastScene = scene;
   var droneEntity = await renderDroneEntity(Cesium, viewer, scene.drone || {}, scene);
   renderOperationalRegion(Cesium, viewer, scene, scene.drone || {});
-  renderZones3D(Cesium, viewer, scene.zones || []);
   renderObstacles(Cesium, viewer, scene.obstacles || []);
   renderNearbyAircraft(Cesium, viewer, scene.nearby_aircraft || []);
   renderDroneTrack(Cesium, viewer, (scene.drone && scene.drone.track) || []);
   var buildingsLoaded = await ensureDrone3DBuildings(Cesium, viewer, scene);
-  viewer.trackedEntity = droneEntity;
+  droneEntity = await renderDroneEntity(Cesium, viewer, scene.drone || {}, scene);
+  renderDroneTrack(Cesium, viewer, (scene.drone && scene.drone.track) || []);
+  syncDrone3DAirspaces(Cesium, viewer, scene, true);
+  viewer.trackedEntity = undefined;
   if (!options || options.flyTo !== false) {
     var camera = scene.scene && scene.scene.camera ? scene.scene.camera : {};
     viewer.camera.flyTo({
@@ -2065,20 +2321,21 @@ async function loadDrone3DScene(droneId, options) {
     if (!res.ok) {
       throw new Error(scene.error || 'Failed to build the 3D scene.');
     }
+    drone3dLastScene = scene;
     setDrone3DMeta(scene);
     var radiusKm = Number(scene.scene && scene.scene.radius_km || 5).toFixed(0);
     var buildingProvider = scene.scene && scene.scene.buildings && scene.scene.buildings.provider ? scene.scene.buildings.provider : 'none';
     document.getElementById('drone3dSubtitle').textContent =
-      radiusKm + ' km terrain-following map around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Terrain, buildings, and nearby airspace refresh while the drone is live.';
+      radiusKm + ' km terrain-following map around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Terrain, buildings, and nearby airspace volumes refresh while the drone is live.';
     var rendered = await renderDrone3DScene(scene, options || {});
     if (rendered.terrainMode === 'ion' && buildingProvider === 'google_photorealistic_3d_tiles' && rendered.buildingsLoaded) {
-      drone3dStatus('Live 3D map loaded with Cesium terrain and Google Photorealistic 3D Tiles around the drone.', 'ok');
+      drone3dStatus('Live 3D map loaded with Cesium terrain, Google Photorealistic 3D Tiles, and nearby airspace volumes.', 'ok');
     } else if (rendered.terrainMode === 'ion' && rendered.buildingsLoaded) {
-      drone3dStatus('Live 3D map loaded with terrain, OSM buildings, and a 5 km operating region around the drone.', 'ok');
+      drone3dStatus('Live 3D map loaded with terrain, OSM buildings, and nearby airspace volumes around the drone.', 'ok');
     } else if (rendered.terrainMode === 'ion') {
-      drone3dStatus('Live 3D map loaded with terrain. Photorealistic or building tiles are unavailable for this session.', 'warn');
+      drone3dStatus('Live 3D map loaded with terrain and nearby airspace volumes. Photorealistic or building tiles are unavailable for this session.', 'warn');
     } else {
-      drone3dStatus('3D map loaded with imagery only. Set DRONE_CESIUM_ION_TOKEN to unlock Cesium terrain and photorealistic 3D tiles.', 'warn');
+      drone3dStatus('3D map loaded with imagery and nearby airspace volumes. Set DRONE_CESIUM_ION_TOKEN to unlock Cesium terrain and photorealistic 3D tiles.', 'warn');
     }
   } finally {
     drone3dFetchInFlight = false;
@@ -2101,7 +2358,7 @@ async function openDrone3D(droneId) {
   if (!authenticatedUser || !droneId) return;
   drone3dActiveDroneId = droneId;
   document.getElementById('drone3dOverlay').style.display = 'block';
-  drone3dStatus('Loading terrain, buildings, and live airspace around the selected drone...', 'info');
+  drone3dStatus('Loading terrain, buildings, and live airspace context around the selected drone...', 'info');
   try {
     await loadDrone3DScene(droneId, { flyTo: true });
     startDrone3DRefresh(droneId, 5);
@@ -2278,6 +2535,9 @@ async function bootstrapDemoFlightPlan() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data.error || 'Failed to bootstrap demo flight plan.');
+    }
+    if (data && data.errors && data.errors.length) {
+      console.warn('Demo flight bootstrap issues', data.errors);
     }
     return data || { created: false, reason: 'unknown' };
   } catch (err) {
@@ -4155,6 +4415,76 @@ def _build_drone_3d_scene(drone_id: str, *, owner_email: str | None, admin_view:
     )
 
 
+_DEMO_FLIGHT_BLUEPRINTS = (
+    {
+        "location_name": "PETROSANI Demo",
+        "purpose": "Automatic demo flight for 2D/3D feature discovery",
+        "selected_twr": "LRAR",
+        "area_kind": "circle",
+        "center_lon": 24.0271,
+        "center_lat": 45.444717,
+        "radius_m": 180,
+    },
+    {
+        "location_name": "BUCHAREST Airspace Demo",
+        "purpose": "Automatic demo flight for crowded Bucharest airspace visualization",
+        "selected_twr": "LRBS",
+        "area_kind": "polygon",
+        "polygon_points": [
+            [26.0495, 44.4820],
+            [26.1290, 44.4835],
+            [26.1485, 44.5220],
+            [26.1025, 44.5535],
+            [26.0415, 44.5260],
+        ],
+    },
+)
+
+
+def _build_demo_payload(
+    owner: dict,
+    *,
+    owner_name: str,
+    start_local: datetime,
+    end_local: datetime,
+    blueprint: dict,
+) -> dict:
+    payload = {
+        "operator_name": owner_name,
+        "operator_contact": "Auto demo bootstrap",
+        "contact_person": owner_name,
+        "phone_landline": "-",
+        "phone_mobile": "0712345678",
+        "fax": "-",
+        "operator_email": owner["email"],
+        "uas_registration": f"YR-DEMO-{str(uuid.uuid4()).split('-')[0].upper()}",
+        "uas_class_code": "C2",
+        "category": "A2",
+        "operation_mode": "VLOS",
+        "mtom_kg": "1.4",
+        "pilot_name": owner_name,
+        "pilot_phone": "0712345678",
+        "purpose": blueprint["purpose"],
+        "location_name": blueprint["location_name"],
+        "area_kind": blueprint["area_kind"],
+        "max_altitude_m": 120,
+        "selected_twr": blueprint["selected_twr"],
+        "start_date": start_local.strftime("%Y-%m-%d"),
+        "end_date": end_local.strftime("%Y-%m-%d"),
+        "start_time": start_local.strftime("%H:%M"),
+        "end_time": end_local.strftime("%H:%M"),
+        "timezone": "Europe/Bucharest",
+        "created_from_app": "auto_demo_bootstrap",
+    }
+    if blueprint["area_kind"] == "circle":
+        payload["center_lon"] = blueprint["center_lon"]
+        payload["center_lat"] = blueprint["center_lat"]
+        payload["radius_m"] = blueprint["radius_m"]
+    else:
+        payload["polygon_points"] = [list(point) for point in blueprint["polygon_points"]]
+    return payload
+
+
 def _bootstrap_demo_flight_plan(owner: dict) -> dict:
     if not AUTO_DEMO_FLIGHT_PLAN_ENABLED:
         return {"created": False, "reason": "disabled"}
@@ -4164,52 +4494,49 @@ def _bootstrap_demo_flight_plan(owner: dict) -> dict:
         include_past=False,
         include_cancelled=False,
     )
-    for plan in active_plans:
-        if (plan.get("runtime_state") or "").lower() == "ongoing":
-            return {
-                "created": False,
-                "reason": "existing-ongoing",
-                "flight_plan": plan,
-            }
+    active_locations = {
+        str(plan.get("location_name") or "").strip().lower()
+        for plan in active_plans
+        if (plan.get("runtime_state") or "").lower() in {"ongoing", "upcoming"}
+    }
 
     now_local = datetime.now(ZoneInfo("Europe/Bucharest"))
     start_local = now_local.replace(second=0, microsecond=0) - timedelta(minutes=5)
     end_local = start_local + timedelta(minutes=60)
     owner_name = (owner.get("display_name") or owner.get("email") or "Demo Pilot").strip()
-    registration_suffix = str(uuid.uuid4()).split("-")[0].upper()
+    created_plans: list[dict] = []
+    errors: list[dict[str, str]] = []
 
-    demo_payload = {
-        "operator_name": owner_name,
-        "operator_contact": "Auto demo bootstrap",
-        "contact_person": owner_name,
-        "phone_landline": "-",
-        "phone_mobile": "0712345678",
-        "fax": "-",
-        "operator_email": owner["email"],
-        "uas_registration": f"YR-DEMO-{registration_suffix}",
-        "uas_class_code": "C2",
-        "category": "A2",
-        "operation_mode": "VLOS",
-        "mtom_kg": "1.4",
-        "pilot_name": owner_name,
-        "pilot_phone": "0712345678",
-        "purpose": "Automatic demo flight for 2D/3D feature discovery",
-        "location_name": "PETROSANI Demo",
-        "area_kind": "circle",
-        "center_lon": 24.0271,
-        "center_lat": 45.444717,
-        "radius_m": 180,
-        "max_altitude_m": 120,
-        "selected_twr": "LRAR",
-        "start_date": start_local.strftime("%Y-%m-%d"),
-        "end_date": end_local.strftime("%Y-%m-%d"),
-        "start_time": start_local.strftime("%H:%M"),
-        "end_time": end_local.strftime("%H:%M"),
-        "timezone": "Europe/Bucharest",
-        "created_from_app": "auto_demo_bootstrap",
+    for blueprint in _DEMO_FLIGHT_BLUEPRINTS:
+        if blueprint["location_name"].strip().lower() in active_locations:
+            continue
+        try:
+            created_plans.append(
+                _create_flight_plan_from_payload(
+                    _build_demo_payload(
+                        owner,
+                        owner_name=owner_name,
+                        start_local=start_local,
+                        end_local=end_local,
+                        blueprint=blueprint,
+                    ),
+                    owner,
+                )
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "location_name": blueprint["location_name"],
+                    "error": str(exc),
+                }
+            )
+
+    return {
+        "created": bool(created_plans),
+        "reason": "created" if created_plans else ("failed" if errors else "existing-demo-plans"),
+        "flight_plans": created_plans,
+        "errors": errors,
     }
-    created = _create_flight_plan_from_payload(demo_payload, owner)
-    return {"created": True, "flight_plan": created}
 
 
 def _run_mock_drone_loop(stop_event: threading.Event):

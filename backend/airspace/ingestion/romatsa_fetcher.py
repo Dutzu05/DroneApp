@@ -21,9 +21,9 @@ class RomatsaLayer:
 
 
 ROMATSA_LAYERS = {
-    'romatsa_wfs_ctr': RomatsaLayer(source='romatsa_wfs_ctr', type_name='carto:CTR_LRBB'),
-    'romatsa_wfs_tma': RomatsaLayer(source='romatsa_wfs_tma', type_name='opr:tma_boundary'),
-    'notam_wfs': RomatsaLayer(source='notam_wfs', type_name='carto:restrictii_notam_pt_uav'),
+    'romatsa_wfs_ctr': RomatsaLayer(source='romatsa_wfs_ctr', type_name='carto:CTR_LRBB', srs_name='EPSG:4326'),
+    'romatsa_wfs_tma': RomatsaLayer(source='romatsa_wfs_tma', type_name='opr:tma_boundary', srs_name='EPSG:4326'),
+    'notam_wfs': RomatsaLayer(source='notam_wfs', type_name='carto:restrictii_notam_pt_uav', srs_name='EPSG:4326'),
 }
 
 

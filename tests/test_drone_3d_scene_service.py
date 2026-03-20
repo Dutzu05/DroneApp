@@ -68,6 +68,23 @@ class _DroneRepoStub:
 
 
 class _AirspaceQueryStub:
+    def __init__(self, zones=None):
+        self.zones = zones or [
+            {
+                'zone_id': 'ctr-clj',
+                'source': 'romatsa_wfs_ctr',
+                'name': 'Cluj CTR',
+                'category': 'ctr',
+                'lower_altitude_m': 0.0,
+                'upper_altitude_m': 1500.0,
+                'distance_m': 1800.0,
+                'geometry': {
+                    'type': 'Polygon',
+                    'coordinates': [[[23.60, 46.76], [23.64, 46.76], [23.64, 46.79], [23.60, 46.79], [23.60, 46.76]]],
+                },
+            }
+        ]
+
     def get_zones_near(self, *, lat, lon, radius_km, categories=None):
         self.last_call = {
             'lat': lat,
@@ -76,22 +93,8 @@ class _AirspaceQueryStub:
             'categories': categories,
         }
         return {
-            'zones': [
-                {
-                    'zone_id': 'ctr-clj',
-                    'source': 'romatsa_wfs_ctr',
-                    'name': 'Cluj CTR',
-                    'category': 'ctr',
-                    'lower_altitude_m': 0.0,
-                    'upper_altitude_m': 1500.0,
-                    'distance_m': 1800.0,
-                    'geometry': {
-                        'type': 'Polygon',
-                        'coordinates': [[[23.60, 46.76], [23.64, 46.76], [23.64, 46.79], [23.60, 46.79], [23.60, 46.76]]],
-                    },
-                }
-            ],
-            'count': 1,
+            'zones': self.zones,
+            'count': len(self.zones),
         }
 
 
@@ -120,6 +123,9 @@ class Drone3DSceneServiceTests(unittest.TestCase):
         self.assertEqual(scene['scene']['imagery']['kind'], 'photorealistic_3d_tiles')
         self.assertEqual(scene['scene']['buildings']['provider'], 'google_photorealistic_3d_tiles')
         self.assertEqual(scene['scene']['follow']['refresh_interval_s'], 5)
+        self.assertTrue(scene['scene']['rendering']['airspace_volumes_default_visible'])
+        self.assertEqual(scene['scene']['rendering']['airspace_altitude_mode'], 'relative_to_ground_visual')
+        self.assertEqual(scene['scene']['rendering']['airspace_volume_max_altitude_m'], 6000.0)
         self.assertEqual(len(scene['obstacles']), 6)
 
     def test_build_scene_raises_for_missing_drone(self):
@@ -130,6 +136,39 @@ class Drone3DSceneServiceTests(unittest.TestCase):
 
         with self.assertRaises(LookupError):
             service.build_scene('UNKNOWN', owner_email='pilot@example.com')
+
+    def test_build_scene_converts_web_mercator_zone_geometry(self):
+        service = Drone3DSceneService(
+            drone_repo=_DroneRepoStub(),
+            airspace_query_service=_AirspaceQueryStub(
+                zones=[
+                    {
+                        'zone_id': 'tma-bucharest',
+                        'source': 'romatsa_wfs_tma',
+                        'name': 'Bucharest TMA',
+                        'category': 'tma',
+                        'lower_altitude_m': 300.0,
+                        'upper_altitude_m': 2400.0,
+                        'distance_m': 900.0,
+                        'geometry': {
+                            'type': 'Polygon',
+                            'coordinates': [[
+                                [2894303.63, 5543147.20],
+                                [2898756.41, 5543147.20],
+                                [2898756.41, 5546294.78],
+                                [2894303.63, 5546294.78],
+                            ]],
+                        },
+                    }
+                ]
+            ),
+        )
+
+        scene = service.build_scene('MOCK-ALPHA', owner_email='pilot@example.com', radius_km=10.0, admin_view=False)
+
+        first = scene['zones'][0]['geometry']['coordinates'][0][0]
+        self.assertAlmostEqual(first[0], 26.0, places=1)
+        self.assertAlmostEqual(first[1], 44.5, places=1)
 
 
 if __name__ == '__main__':
