@@ -1657,8 +1657,8 @@ function droneBillboardImage() {
   return 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
       '<circle cx="32" cy="32" r="18" fill="#08111c" fill-opacity="0.78" stroke="#d7ecff" stroke-width="3"/>' +
-      '<path d="M32 8 L43 29 H36 V49 H28 V29 H21 Z" fill="#58a6ff" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>' +
-      '<circle cx="32" cy="32" r="4.5" fill="#ffffff"/>' +
+      '<circle cx="32" cy="32" r="8.5" fill="#58a6ff" stroke="#ffffff" stroke-width="2"/>' +
+      '<path d="M32 12 V18 M32 46 V52 M12 32 H18 M46 32 H52" stroke="#d7ecff" stroke-width="2.5" stroke-linecap="round"/>' +
     '</svg>'
   );
 }
@@ -1831,7 +1831,6 @@ async function renderDroneEntity(Cesium, viewer, drone, scene) {
       image: droneBillboardImage(),
       width: 44,
       height: 44,
-      rotation: Cesium.Math.toRadians(Number(drone.heading || 0)),
       heightReference: pose.heightReference,
       disableDepthTestDistance: Number.POSITIVE_INFINITY,
       scaleByDistance: new Cesium.NearFarScalar(250, 1.2, 20000, 0.92),
