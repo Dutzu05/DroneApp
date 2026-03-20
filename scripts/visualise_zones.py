@@ -1845,11 +1845,13 @@ async function ensureDrone3DBuildings(Cesium, viewer, scene) {
     drone3dBuildingsTileset = null;
   }
   drone3dBuildingsMode = requestedBuildings;
-  if (requestedBuildings !== 'cesium_osm_buildings') {
+  if (requestedBuildings !== 'cesium_osm_buildings' && requestedBuildings !== 'google_photorealistic_3d_tiles') {
     return false;
   }
   try {
-    if (typeof Cesium.createOsmBuildingsAsync === 'function') {
+    if (requestedBuildings === 'google_photorealistic_3d_tiles' && typeof Cesium.createGooglePhotorealistic3DTileset === 'function') {
+      drone3dBuildingsTileset = await Cesium.createGooglePhotorealistic3DTileset();
+    } else if (typeof Cesium.createOsmBuildingsAsync === 'function') {
       drone3dBuildingsTileset = await Cesium.createOsmBuildingsAsync({
         defaultColor: Cesium.Color.fromCssColorString('#d7c7a3').withAlpha(0.88),
         enableShowOutline: false,
@@ -1914,15 +1916,18 @@ async function loadDrone3DScene(droneId, options) {
     }
     setDrone3DMeta(scene);
     var radiusKm = Number(scene.scene && scene.scene.radius_km || 5).toFixed(0);
+    var buildingProvider = scene.scene && scene.scene.buildings && scene.scene.buildings.provider ? scene.scene.buildings.provider : 'none';
     document.getElementById('drone3dSubtitle').textContent =
       radiusKm + ' km terrain-following map around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Terrain, buildings, and nearby airspace refresh while the drone is live.';
     var rendered = await renderDrone3DScene(scene, options || {});
-    if (rendered.terrainMode === 'ion' && rendered.buildingsLoaded) {
+    if (rendered.terrainMode === 'ion' && buildingProvider === 'google_photorealistic_3d_tiles' && rendered.buildingsLoaded) {
+      drone3dStatus('Live 3D map loaded with Cesium terrain and Google Photorealistic 3D Tiles around the drone.', 'ok');
+    } else if (rendered.terrainMode === 'ion' && rendered.buildingsLoaded) {
       drone3dStatus('Live 3D map loaded with terrain, OSM buildings, and a 5 km operating region around the drone.', 'ok');
     } else if (rendered.terrainMode === 'ion') {
-      drone3dStatus('Live 3D map loaded with terrain. Building tiles are unavailable for this session.', 'warn');
+      drone3dStatus('Live 3D map loaded with terrain. Photorealistic or building tiles are unavailable for this session.', 'warn');
     } else {
-      drone3dStatus('3D map loaded with imagery only. Set DRONE_CESIUM_ION_TOKEN to unlock terrain relief and 3D buildings.', 'warn');
+      drone3dStatus('3D map loaded with imagery only. Set DRONE_CESIUM_ION_TOKEN to unlock Cesium terrain and photorealistic 3D tiles.', 'warn');
     }
   } finally {
     drone3dFetchInFlight = false;

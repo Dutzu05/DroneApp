@@ -181,15 +181,15 @@ class Drone3DSceneService:
                     'ion_token': self.cesium_ion_token,
                 },
                 'imagery': {
-                    'provider': 'openstreetmap',
-                    'url': 'https://tile.openstreetmap.org/',
-                    'attribution': '(c) OpenStreetMap contributors',
-                    'kind': 'street',
+                    'provider': 'google_photorealistic_3d_tiles' if self.cesium_ion_token else 'openstreetmap',
+                    'url': 'https://tile.openstreetmap.org/' if not self.cesium_ion_token else '',
+                    'attribution': '(c) OpenStreetMap contributors' if not self.cesium_ion_token else 'Google Photorealistic 3D Tiles via Cesium ion',
+                    'kind': 'photorealistic_3d_tiles' if self.cesium_ion_token else 'street',
                 },
                 'buildings': {
-                    'provider': 'cesium_osm_buildings' if self.cesium_ion_token else 'none',
+                    'provider': 'google_photorealistic_3d_tiles' if self.cesium_ion_token else 'none',
                     'ion_enabled': bool(self.cesium_ion_token),
-                    'source': 'openstreetmap',
+                    'source': 'google' if self.cesium_ion_token else 'none',
                 },
                 'follow': {
                     'mode': 'tracked_entity',
@@ -217,7 +217,7 @@ class Drone3DSceneService:
                         'enabled': bool(self.cesium_ion_token),
                     },
                     {
-                        'name': 'Cesium OSM Buildings',
+                        'name': 'Google Photorealistic 3D Tiles' if self.cesium_ion_token else 'Cesium OSM Buildings',
                         'type': 'buildings',
                         'enabled': bool(self.cesium_ion_token),
                     },

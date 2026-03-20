@@ -43,6 +43,7 @@ services:
       PGUSER: drone
       PGPASSWORD: drone
       DRONE_DB_NAME: drone_app
+      DRONE_CESIUM_ION_TOKEN: ${DRONE_CESIUM_ION_TOKEN:-}
       DRONE_GOOGLE_WEB_CLIENT_ID: ${DRONE_GOOGLE_WEB_CLIENT_ID:-1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com}
       DRONE_ANEXA1_TEMPLATE_PATH: /app/assets/templates/ANEXA1.pdf
       DRONE_RUN_MIGRATIONS: 0
