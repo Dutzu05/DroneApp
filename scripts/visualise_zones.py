@@ -1641,6 +1641,128 @@ function removeDrone3DEntities(viewer, prefixes) {
   });
 }
 
+function metersPerLonDegree(lat) {
+  return Math.max(Math.cos((Number(lat) || 0) * Math.PI / 180), 0.25) * 111320.0;
+}
+
+function offsetPoint(lat, lon, distanceM, bearingDeg) {
+  var bearingRad = (Number(bearingDeg) || 0) * Math.PI / 180;
+  return {
+    latitude: Number(lat) + Math.cos(bearingRad) * Number(distanceM || 0) / 111320.0,
+    longitude: Number(lon) + Math.sin(bearingRad) * Number(distanceM || 0) / metersPerLonDegree(lat),
+  };
+}
+
+function droneBillboardImage() {
+  return 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+      '<circle cx="32" cy="32" r="18" fill="#08111c" fill-opacity="0.78" stroke="#d7ecff" stroke-width="3"/>' +
+      '<path d="M32 8 L43 29 H36 V49 H28 V29 H21 Z" fill="#58a6ff" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>' +
+      '<circle cx="32" cy="32" r="4.5" fill="#ffffff"/>' +
+    '</svg>'
+  );
+}
+
+async function resolveDronePose(Cesium, viewer, drone, scene) {
+  var lat = Number(drone.latitude || 0);
+  var lon = Number(drone.longitude || 0);
+  var aglHeight = Math.max(Number(drone.altitude || 0), 12);
+  var pose = {
+    position: Cesium.Cartesian3.fromDegrees(lon, lat, aglHeight),
+    groundHeight: null,
+    absoluteHeight: aglHeight,
+    heightReference: Cesium.HeightReference ? Cesium.HeightReference.NONE : undefined,
+    sampledTerrain: false,
+  };
+  var terrainMode = scene && scene.scene && scene.scene.terrain && scene.scene.terrain.provider;
+  if (terrainMode === 'ion' && viewer && viewer.terrainProvider && typeof Cesium.sampleTerrainMostDetailed === 'function') {
+    try {
+      var sample = await Cesium.sampleTerrainMostDetailed(
+        viewer.terrainProvider,
+        [Cesium.Cartographic.fromDegrees(lon, lat)]
+      );
+      var terrainHeight = Number(sample && sample[0] && sample[0].height);
+      if (Number.isFinite(terrainHeight)) {
+        pose.groundHeight = terrainHeight;
+        pose.absoluteHeight = terrainHeight + aglHeight;
+        pose.position = Cesium.Cartesian3.fromDegrees(lon, lat, pose.absoluteHeight);
+        pose.sampledTerrain = true;
+      }
+    } catch (err) {}
+  }
+  if (!pose.sampledTerrain && terrainMode === 'ion' && viewer && viewer.scene && viewer.scene.globe && typeof viewer.scene.globe.getHeight === 'function') {
+    try {
+      var fallbackHeight = Number(viewer.scene.globe.getHeight(Cesium.Cartographic.fromDegrees(lon, lat)));
+      if (Number.isFinite(fallbackHeight)) {
+        pose.groundHeight = fallbackHeight;
+        pose.absoluteHeight = fallbackHeight + aglHeight;
+        pose.position = Cesium.Cartesian3.fromDegrees(lon, lat, pose.absoluteHeight);
+        pose.sampledTerrain = true;
+      }
+    } catch (err) {}
+  }
+  if (!pose.sampledTerrain && terrainMode === 'ion' && Cesium.HeightReference) {
+    pose.heightReference = Cesium.HeightReference.RELATIVE_TO_GROUND;
+  }
+  return pose;
+}
+
+function renderDroneHeadingIndicator(Cesium, viewer, drone, pose) {
+  var entity = viewer.entities.getById('focus-drone-heading');
+  if (!pose || !pose.sampledTerrain) {
+    if (entity) viewer.entities.remove(entity);
+    return;
+  }
+  var target = offsetPoint(
+    Number(drone.latitude || 0),
+    Number(drone.longitude || 0),
+    Math.max(Number(drone.speed || 0) * 7.5, 70),
+    Number(drone.heading || 0)
+  );
+  var arrow = {
+    positions: [
+      pose.position,
+      Cesium.Cartesian3.fromDegrees(Number(target.longitude || 0), Number(target.latitude || 0), pose.absoluteHeight),
+    ],
+    width: 6,
+    material: new Cesium.PolylineArrowMaterialProperty(
+      Cesium.Color.fromCssColorString('#8cd6ff').withAlpha(0.96)
+    ),
+  };
+  if (entity) {
+    entity.polyline = arrow;
+    return;
+  }
+  viewer.entities.add({
+    id: 'focus-drone-heading',
+    polyline: arrow,
+  });
+}
+
+function renderDroneAltitudeAnchor(Cesium, viewer, drone, pose) {
+  var entity = viewer.entities.getById('focus-drone-anchor');
+  if (!pose || !pose.sampledTerrain || pose.absoluteHeight - pose.groundHeight < 3) {
+    if (entity) viewer.entities.remove(entity);
+    return;
+  }
+  var anchor = {
+    positions: [
+      Cesium.Cartesian3.fromDegrees(Number(drone.longitude || 0), Number(drone.latitude || 0), pose.groundHeight + 1.5),
+      pose.position,
+    ],
+    width: 2,
+    material: Cesium.Color.fromCssColorString('#8cd6ff').withAlpha(0.52),
+  };
+  if (entity) {
+    entity.polyline = anchor;
+    return;
+  }
+  viewer.entities.add({
+    id: 'focus-drone-anchor',
+    polyline: anchor,
+  });
+}
+
 function renderOperationalRegion(Cesium, viewer, scene, drone) {
   if (!scene || !scene.scene || !scene.scene.focus_region || !drone) return;
   var region = scene.scene.focus_region;
@@ -1691,8 +1813,10 @@ function renderDroneTrack(Cesium, viewer, track) {
   });
 }
 
-function renderDroneEntity(Cesium, viewer, drone, scene) {
-  var position = Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), Number(drone.altitude || 0));
+async function renderDroneEntity(Cesium, viewer, drone, scene) {
+  var pose = await resolveDronePose(Cesium, viewer, drone, scene);
+  var position = pose.position;
+  var labelText = String(drone.label || drone.drone_id || 'DRONE');
   var hpr = new Cesium.HeadingPitchRoll(
     Cesium.Math.toRadians(Number(drone.heading || 0)),
     Cesium.Math.toRadians(Number(drone.pitch || 0)),
@@ -1702,28 +1826,56 @@ function renderDroneEntity(Cesium, viewer, drone, scene) {
   var entityState = {
     position: position,
     orientation: Cesium.Transforms.headingPitchRollQuaternion(position, hpr),
-    viewFrom: new Cesium.Cartesian3(-viewDistance, 0, viewDistance * 0.38),
-    box: {
-      dimensions: new Cesium.Cartesian3(18, 18, 6),
-      material: Cesium.Color.fromCssColorString('#58a6ff').withAlpha(0.95),
-      outline: true,
-      outlineColor: Cesium.Color.WHITE.withAlpha(0.8),
+    viewFrom: new Cesium.Cartesian3(-viewDistance, 0, viewDistance * 0.42),
+    billboard: {
+      image: droneBillboardImage(),
+      width: 44,
+      height: 44,
+      rotation: Cesium.Math.toRadians(Number(drone.heading || 0)),
+      heightReference: pose.heightReference,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      scaleByDistance: new Cesium.NearFarScalar(250, 1.2, 20000, 0.92),
+      eyeOffset: new Cesium.Cartesian3(0, 0, -80),
+    },
+    point: {
+      pixelSize: 9,
+      color: Cesium.Color.fromCssColorString('#58a6ff').withAlpha(0.95),
+      outlineColor: Cesium.Color.WHITE.withAlpha(0.92),
+      outlineWidth: 2,
+      heightReference: pose.heightReference,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      scaleByDistance: new Cesium.NearFarScalar(250, 1.1, 20000, 0.85),
     },
     label: {
-      text: drone.drone_id || 'DRONE',
-      font: '14px sans-serif',
+      text: labelText,
+      font: '700 15px "Segoe UI", sans-serif',
+      style: Cesium.LabelStyle.FILL_AND_OUTLINE,
       fillColor: Cesium.Color.WHITE,
+      outlineColor: Cesium.Color.BLACK.withAlpha(0.95),
+      outlineWidth: 3,
       showBackground: true,
-      backgroundColor: Cesium.Color.BLACK.withAlpha(0.65),
-      pixelOffset: new Cesium.Cartesian2(0, -28),
+      backgroundColor: Cesium.Color.fromCssColorString('#08111c').withAlpha(0.78),
+      backgroundPadding: new Cesium.Cartesian2(10, 6),
+      pixelOffset: new Cesium.Cartesian2(0, -42),
+      pixelOffsetScaleByDistance: new Cesium.NearFarScalar(250, 1.0, 20000, 0.7),
+      scaleByDistance: new Cesium.NearFarScalar(250, 1.08, 20000, 0.92),
+      horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+      verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+      heightReference: pose.heightReference,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      eyeOffset: new Cesium.Cartesian3(0, 0, -120),
     },
   };
+  renderDroneHeadingIndicator(Cesium, viewer, drone, pose);
+  renderDroneAltitudeAnchor(Cesium, viewer, drone, pose);
   var entity = viewer.entities.getById('focus-drone');
   if (entity) {
     entity.position = entityState.position;
     entity.orientation = entityState.orientation;
     entity.viewFrom = entityState.viewFrom;
-    entity.box = entityState.box;
+    entity.box = undefined;
+    entity.billboard = entityState.billboard;
+    entity.point = entityState.point;
     entity.label = entityState.label;
     return entity;
   }
@@ -1873,7 +2025,7 @@ async function renderDrone3DScene(scene, options) {
   var prepared = await ensureDrone3DViewer(scene);
   var Cesium = prepared.Cesium;
   var viewer = prepared.viewer;
-  var droneEntity = renderDroneEntity(Cesium, viewer, scene.drone || {}, scene);
+  var droneEntity = await renderDroneEntity(Cesium, viewer, scene.drone || {}, scene);
   renderOperationalRegion(Cesium, viewer, scene, scene.drone || {});
   renderZones3D(Cesium, viewer, scene.zones || []);
   renderObstacles(Cesium, viewer, scene.obstacles || []);
