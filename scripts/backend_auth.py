@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from http.cookies import SimpleCookie
@@ -26,7 +27,32 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    return raw_value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _environment_name() -> str:
+    return (os.environ.get("DRONE_ENV") or "development").strip().lower() or "development"
+
+
+def _configured_session_secret() -> bytes | None:
+    raw_value = os.environ.get("DRONE_SESSION_SECRET")
+    if raw_value is None or not raw_value.strip():
+        return None
+    return raw_value.strip().encode("utf-8")
+
+
 def _load_session_secret() -> bytes:
+    configured_secret = _configured_session_secret()
+    if configured_secret is not None:
+        return configured_secret
+
+    if _environment_name() == "production":
+        raise RuntimeError("DRONE_SESSION_SECRET is required when DRONE_ENV=production")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if SESSION_SECRET_FILE.exists():
         return SESSION_SECRET_FILE.read_bytes()
@@ -76,14 +102,27 @@ def decode_session_token(token: str) -> dict[str, Any] | None:
     return payload
 
 
+def _cookie_attributes(*, max_age: int) -> str:
+    attributes = [
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Lax",
+        f"Max-Age={max_age}",
+    ]
+    cookie_domain = (os.environ.get("DRONE_COOKIE_DOMAIN") or "").strip()
+    if cookie_domain:
+        attributes.append(f"Domain={cookie_domain}")
+    if _env_flag("DRONE_COOKIE_SECURE", default=_environment_name() == "production"):
+        attributes.append("Secure")
+    return "; ".join(attributes)
+
+
 def session_cookie_header(token: str, *, max_age: int = SESSION_TTL_SECONDS) -> str:
-    return (
-        f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
-    )
+    return f"{SESSION_COOKIE_NAME}={token}; {_cookie_attributes(max_age=max_age)}"
 
 
 def clear_session_cookie_header() -> str:
-    return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+    return f"{SESSION_COOKIE_NAME}=; {_cookie_attributes(max_age=0)}"
 
 
 def _extract_cookie_value(raw_cookie: str, cookie_name: str) -> str | None:

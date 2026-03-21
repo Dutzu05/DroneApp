@@ -41,12 +41,15 @@ import sys
 import uuid
 import webbrowser
 from datetime import date, datetime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from zoneinfo import ZoneInfo
 
+SCRIPT_MODULE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(SCRIPT_MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_MODULE_DIR))
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -119,6 +122,40 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ASSET_DIR  = SCRIPT_DIR.parent / "mobile_app" / "assets"
 LOGGED_ACCOUNTS_FILE = SCRIPT_DIR.parent / ".data" / "logged_accounts.json"
 FLIGHT_PLAN_PDF_DIR = SCRIPT_DIR.parent / ".data" / "flight_plans"
+APP_ENV = (os.environ.get("DRONE_ENV") or "development").strip().lower() or "development"
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    return raw_value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _split_csv_env(name: str) -> list[str]:
+    raw_value = os.environ.get(name) or ""
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def _origin_from_url(value: str) -> str:
+    parsed = urlparse(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+PUBLIC_BASE_URL = (os.environ.get("DRONE_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+PUBLIC_ORIGIN = _origin_from_url(PUBLIC_BASE_URL)
+ALLOWED_ORIGINS = {
+    origin
+    for origin in (_origin_from_url(value) for value in _split_csv_env("DRONE_ALLOWED_ORIGINS"))
+    if origin
+}
+if PUBLIC_ORIGIN:
+    ALLOWED_ORIGINS.add(PUBLIC_ORIGIN)
+if APP_ENV != "production" and not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS.update({"http://localhost:5174", "http://127.0.0.1:5174"})
+ADMIN_EMAILS = {value.strip().lower() for value in _split_csv_env("DRONE_ADMIN_EMAILS")}
 GOOGLE_WEB_CLIENT_ID = os.environ.get(
     "DRONE_GOOGLE_WEB_CLIENT_ID",
     "1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com",
@@ -139,8 +176,14 @@ DRONE_3D_SCENE_SERVICE = Drone3DSceneService(
     cesium_ion_token=CESIUM_ION_TOKEN,
     traffic_conflict_service=TRAFFIC_CONFLICT_SERVICE,
 )
-AUTO_DEMO_FLIGHT_PLAN_ENABLED = os.environ.get("DRONE_AUTO_DEMO_FLIGHT_PLAN", "1").strip().lower() not in {"0", "false", "no"}
-MOCK_DRONE_ENABLED = os.environ.get("DRONE_ENABLE_MOCK_TELEMETRY", "1").strip().lower() not in {"0", "false", "no"}
+AUTO_DEMO_FLIGHT_PLAN_ENABLED = os.environ.get(
+    "DRONE_AUTO_DEMO_FLIGHT_PLAN",
+    "0" if APP_ENV == "production" else "1",
+).strip().lower() not in {"0", "false", "no"}
+MOCK_DRONE_ENABLED = os.environ.get(
+    "DRONE_ENABLE_MOCK_TELEMETRY",
+    "0" if APP_ENV == "production" else "1",
+).strip().lower() not in {"0", "false", "no"}
 MOCK_DRONE_INTERVAL_SECONDS = max(1.0, float(os.environ.get("DRONE_MOCK_TELEMETRY_INTERVAL", "3")))
 _mock_drone_stop = threading.Event()
 _mock_drone_thread: threading.Thread | None = None
@@ -1341,7 +1384,7 @@ HTML = b"""<!DOCTYPE html>
     </p>
     <div id="googleLoginButton"></div>
     <div class="auth-error" id="authError"></div>
-    <div class="auth-note">Authorized local origin: <code>http://localhost:5174</code></div>
+    <div class="auth-note">Authorized sign-in origin: <code>__AUTHORIZED_ORIGIN__</code></div>
   </div>
 </div>
 
@@ -4652,6 +4695,24 @@ def _require_session_user(headers) -> dict:
     return user
 
 
+def _is_admin_user(user: dict | None) -> bool:
+    if not user:
+        return False
+    email = str(user.get("email") or "").strip().lower()
+    return bool(email and email in ADMIN_EMAILS)
+
+
+def _require_admin_user(headers) -> dict:
+    user = _require_session_user(headers)
+    if ADMIN_EMAILS:
+        if not _is_admin_user(user):
+            raise PermissionError("Admin access required")
+        return user
+    if APP_ENV == "production":
+        raise PermissionError("Admin access is not configured")
+    return user
+
+
 def _ensure_db_user(user: dict, app_name: str):
     try:
         _upsert_app_user(user, app_name)
@@ -5085,6 +5146,10 @@ class Handler(BaseHTTPRequestHandler):
                 b"__CESIUM_ION_TOKEN__",
                 CESIUM_ION_TOKEN.encode("utf-8"),
             )
+            page = page.replace(
+                b"__AUTHORIZED_ORIGIN__",
+                (PUBLIC_ORIGIN or "http://localhost:5174").encode("utf-8"),
+            )
             self._send(
                 200,
                 "text/html; charset=utf-8",
@@ -5092,28 +5157,44 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         elif path in ("/admin", "/admin/logged-accounts", "/admin/flight-plans"):
-            self._send(200, "text/html; charset=utf-8", ADMIN_DASHBOARD_HTML.encode("utf-8"))
+            try:
+                _require_admin_user(self.headers)
+                self._send(200, "text/html; charset=utf-8", ADMIN_DASHBOARD_HTML.encode("utf-8"))
+            except PermissionError as exc:
+                self._send(403, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/auth/sessions":
-            self._send(
-                200,
-                "application/json; charset=utf-8",
-                _json_bytes({"accounts": _list_logged_accounts()}),
-            )
+            try:
+                _require_admin_user(self.headers)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"accounts": _list_logged_accounts()}),
+                )
+            except PermissionError as exc:
+                self._send(403, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/admin/overview":
-            self._send(
-                200,
-                "application/json; charset=utf-8",
-                _json_bytes(_build_admin_overview_response()),
-            )
+            try:
+                _require_admin_user(self.headers)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(_build_admin_overview_response()),
+                )
+            except PermissionError as exc:
+                self._send(403, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/admin/drones/live":
-            self._send(
-                200,
-                "application/json; charset=utf-8",
-                _json_bytes({"drones": _list_live_drones_for_admin()}),
-            )
+            try:
+                _require_admin_user(self.headers)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"drones": _list_live_drones_for_admin()}),
+                )
+            except PermissionError as exc:
+                self._send(403, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path == "/api/auth/me":
             user = _safe_session_user(self.headers)
@@ -5154,12 +5235,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/admin/drones/") and path.endswith("/scene-3d"):
             drone_id = path[len("/api/admin/drones/"):-len("/scene-3d")].strip("/")
             try:
+                _require_admin_user(self.headers)
                 scene = _build_drone_3d_scene(drone_id, owner_email=None, admin_view=True)
                 self._send(
                     200,
                     "application/json; charset=utf-8",
                     _json_bytes(scene, ensure_ascii=False),
                 )
+            except PermissionError as exc:
+                self._send(403, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except LookupError as exc:
                 self._send(404, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except Exception as exc:
@@ -5229,8 +5313,10 @@ class Handler(BaseHTTPRequestHandler):
                 scope = (qs.get("scope", ["mine"])[0] or "mine").lower()
                 include_past = (qs.get("include_past", ["0"])[0] or "0") in ("1", "true", "yes")
                 include_cancelled = (qs.get("include_cancelled", ["1"])[0] or "1") in ("1", "true", "yes")
-                owner_email = None
-                if scope != "all":
+                if scope == "all":
+                    _require_admin_user(self.headers)
+                    owner_email = None
+                else:
                     owner_email = _require_session_user(self.headers)["email"]
                 plans = _list_flight_plans_response(
                     owner_email=owner_email,
@@ -5250,7 +5336,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/flight-plans/") and path.endswith("/pdf"):
             public_id = path[len("/api/flight-plans/"):-len("/pdf")].strip("/")
             try:
-                plan = FLIGHT_PLANS_MODULE.get(public_id)
+                user = _require_session_user(self.headers)
+                owner_email = None if _is_admin_user(user) else user["email"]
+                plan = FLIGHT_PLANS_MODULE.get(public_id, owner_email=owner_email)
                 if not plan:
                     self._send(404, "application/json; charset=utf-8", b'{"error":"Flight plan not found"}')
                     return
@@ -5258,13 +5346,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not pdf_path.exists():
                     raise FileNotFoundError(f"Generated PDF missing for {public_id}")
                 pdf_bytes = pdf_path.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/pdf")
-                self.send_header("Content-Length", str(len(pdf_bytes)))
-                self.send_header("Content-Disposition", f'attachment; filename="{public_id}.pdf"')
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(pdf_bytes)
+                self._send_raw(
+                    200,
+                    "application/pdf",
+                    pdf_bytes,
+                    extra_headers={"Content-Disposition": f'attachment; filename="{public_id}.pdf"'},
+                )
+            except PermissionError as exc:
+                self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except Exception as exc:
                 self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
@@ -5310,22 +5399,44 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, "text/plain", b"Not found")
 
-    def _send(self, code: int, ctype: str, body: bytes, extra_headers: dict[str, str] | None = None):
+    def _allowed_origin(self) -> str:
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin in ALLOWED_ORIGINS:
+            return origin
+        return ""
+
+    def _send_raw(self, code: int, ctype: str, body: bytes, extra_headers: dict[str, str] | None = None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        allowed_origin = self._allowed_origin()
+        if allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Vary", "Origin")
         self.send_header("Cache-Control", "no-cache")
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
+    def _send(self, code: int, ctype: str, body: bytes, extra_headers: dict[str, str] | None = None):
+        self._send_raw(code, ctype, body, extra_headers=extra_headers)
+
     def do_OPTIONS(self):
+        allowed_origin = self._allowed_origin()
+        if not allowed_origin:
+            self._send(403, "application/json; charset=utf-8", _json_bytes({"error": "Origin not allowed"}))
+            return
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", allowed_origin)
+        self.send_header("Access-Control-Allow-Credentials", "true")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            self.headers.get("Access-Control-Request-Headers", "Content-Type"),
+        )
+        self.send_header("Vary", "Origin")
         self.end_headers()
 
     def do_POST(self):
@@ -5404,8 +5515,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/admin/flight-plans/") and path.endswith("/approve"):
             public_id = path[len("/api/admin/flight-plans/"):-len("/approve")].strip("/")
             try:
+                _require_admin_user(self.headers)
                 payload = json.loads(raw) if raw else {}
-                approver_email = str((payload or {}).get("approver_email") or "admin@local")
+                approver_email = str((payload or {}).get("approver_email") or _require_admin_user(self.headers)["email"])
                 note = str((payload or {}).get("note") or "")
                 approved = _approve_flight_plan(public_id, approver_email=approver_email, note=note)
                 self._send(
@@ -5413,6 +5525,8 @@ class Handler(BaseHTTPRequestHandler):
                     "application/json; charset=utf-8",
                     _json_bytes({"ok": True, "flight_plan": approved}, ensure_ascii=False),
                 )
+            except PermissionError as exc:
+                self._send(403, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except ValueError as exc:
                 self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
             except Exception as exc:
@@ -5501,13 +5615,12 @@ class Handler(BaseHTTPRequestHandler):
                 pdf_path = Path("/tmp/anexa1_filled.pdf")
                 _generate_anexa1_pdf(plan, pdf_path)
                 pdf_bytes = pdf_path.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/pdf")
-                self.send_header("Content-Length", str(len(pdf_bytes)))
-                self.send_header("Content-Disposition", 'attachment; filename="ANEXA1_filled.pdf"')
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(pdf_bytes)
+                self._send_raw(
+                    200,
+                    "application/pdf",
+                    pdf_bytes,
+                    extra_headers={"Content-Disposition": 'attachment; filename="ANEXA1_filled.pdf"'},
+                )
             except Exception as exc:
                 self._send(500, "application/json", _json_bytes({"error": str(exc)}))
         else:
@@ -5532,7 +5645,7 @@ def main():
     if not _fm.ANEXA1_TEMPLATE_PATH.exists():
         print(f"  Warning: missing ANEXA 1 template: {_fm.ANEXA1_TEMPLATE_PATH}")
 
-    url = f"http://localhost:{args.port}"
+    url = PUBLIC_BASE_URL or f"http://localhost:{args.port}"
     found = [k for k, p in LAYER_FILES.items() if p.exists()]
     print(f"\n  ROMATSA Mirror  ->  {url}")
     print(f"  Layers found: {len(found)}/{len(LAYER_FILES)}: {', '.join(found)}")
@@ -5543,10 +5656,10 @@ def main():
         print(f"  Mock drone telemetry: enabled ({MOCK_DRONE_INTERVAL_SECONDS:.0f}s interval)")
     print("  Press Ctrl-C to stop.\n")
 
-    server = HTTPServer((args.host, args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     _start_mock_drone_loop()
 
-    if not args.no_browser:
+    if not args.no_browser and not PUBLIC_BASE_URL:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 
     try:

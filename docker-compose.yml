@@ -43,14 +43,22 @@ services:
       PGUSER: drone
       PGPASSWORD: drone
       DRONE_DB_NAME: drone_app
+      DRONE_ENV: ${DRONE_ENV:-development}
+      DRONE_PUBLIC_BASE_URL: ${DRONE_PUBLIC_BASE_URL:-}
+      DRONE_ALLOWED_ORIGINS: ${DRONE_ALLOWED_ORIGINS:-}
+      DRONE_ADMIN_EMAILS: ${DRONE_ADMIN_EMAILS:-}
+      DRONE_SESSION_SECRET: ${DRONE_SESSION_SECRET:-}
+      DRONE_COOKIE_SECURE: ${DRONE_COOKIE_SECURE:-0}
+      DRONE_COOKIE_DOMAIN: ${DRONE_COOKIE_DOMAIN:-}
       DRONE_CESIUM_ION_TOKEN: ${DRONE_CESIUM_ION_TOKEN:-}
       DRONE_GOOGLE_WEB_CLIENT_ID: ${DRONE_GOOGLE_WEB_CLIENT_ID:-1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com}
       DRONE_ANEXA1_TEMPLATE_PATH: /app/assets/templates/ANEXA1.pdf
       DRONE_RUN_MIGRATIONS: 0
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
     volumes:
       - app_data:/app/.data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:5174/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:5174/readyz"]
       interval: 15s
       timeout: 5s
       retries: 10

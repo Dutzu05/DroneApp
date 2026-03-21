@@ -12,6 +12,11 @@ The backend serves both the frontend and API from the same Python container.
 
 ## Required environment variables
 - `DRONE_GOOGLE_WEB_CLIENT_ID`
+- `DRONE_PUBLIC_BASE_URL`
+- `DRONE_ALLOWED_ORIGINS`
+- `DRONE_ADMIN_EMAILS`
+- `DRONE_ENV=production`
+- `DRONE_SESSION_SECRET`
 - `DRONE_DB_NAME` default: `drone_app`
 - `PGHOST`
 - `PGPORT`
@@ -57,5 +62,10 @@ Recommended approach:
 ## Production notes
 - `.data/` contains session state, login logs, and generated PDFs. Mount it to persistent storage.
 - Update your Google OAuth allowed origins to include the real public domain, not just localhost.
+- Restrict `DRONE_ALLOWED_ORIGINS` to the real public frontend origins instead of using wildcard CORS.
+- Set `DRONE_ADMIN_EMAILS` so admin dashboard and approval endpoints require an explicit allowlist.
+- Set `DRONE_SESSION_SECRET` from your secret manager; do not rely on auto-generated local secrets in production.
+- The production web entrypoint is now `backend.web_app:app` and should run behind the default Docker command.
 - The backend exposes `/healthz` for container health checks.
+- The web app exposes `/readyz` for readiness/config validation.
 - `scripts/init-db.sh` is now env-driven and can run against local Postgres, Docker Postgres, or managed Postgres.

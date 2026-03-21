@@ -23,4 +23,4 @@ EXPOSE 5174
 VOLUME ["/app/.data"]
 
 ENTRYPOINT ["./docker/entrypoint.sh"]
-CMD ["python3", "scripts/visualise_zones.py", "--no-browser"]
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:${PORT:-5174} backend.web_app:app"]
