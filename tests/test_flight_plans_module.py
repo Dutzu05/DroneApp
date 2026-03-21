@@ -146,6 +146,37 @@ class FlightPlansModuleTest(unittest.TestCase):
         self.assertFalse(cancelled['can_cancel'])
         self.assertEqual(repo.cancelled[0], ('FP-1', 'pilot@example.com'))
 
+    def test_assess_get_approve_and_twr_options_delegate(self):
+        tmp_dir = self._workspace_temp_dir()
+        module, _ = self._build_module(tmp_dir / 'data' / 'flight_plans')
+
+        assessed = module.assess({'area_kind': 'polygon', 'polygon_points': [[1, 2], [3, 4]], 'max_altitude_m': 90})
+        loaded = module.get('FP-42', owner_email='pilot@example.com')
+        approved = module.approve('FP-42', approver_email='ops@example.com', note='ready')
+        twr_options = module.twr_options()
+
+        self.assertEqual(assessed['risk_level'], 'LOW')
+        self.assertEqual(loaded['public_id'], 'FP-42')
+        self.assertEqual(approved['approval_status'], 'approved')
+        self.assertEqual(approved['approval_note'], 'ready')
+        self.assertEqual(twr_options, [{'icao': 'LROP'}])
+
+    def test_approve_raises_when_repo_returns_none(self):
+        tmp_dir = self._workspace_temp_dir()
+        module, _ = self._build_module(tmp_dir / 'data' / 'flight_plans')
+        module.repo._approve_plan = lambda public_id, *, approver_email, note='': None
+
+        with self.assertRaisesRegex(ValueError, 'Flight plan cannot be approved'):
+            module.approve('FP-99', approver_email='ops@example.com')
+
+    def test_cancel_raises_when_repo_returns_none(self):
+        tmp_dir = self._workspace_temp_dir()
+        module, _ = self._build_module(tmp_dir / 'data' / 'flight_plans')
+        module.repo._cancel_plan = lambda public_id, *, owner_email: None
+
+        with self.assertRaisesRegex(ValueError, 'Flight plan cannot be cancelled'):
+            module.cancel('FP-99', {'email': 'pilot@example.com'})
+
 
 if __name__ == '__main__':
     unittest.main()
