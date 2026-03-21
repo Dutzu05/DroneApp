@@ -213,6 +213,47 @@ class Drone3DSceneServiceTests(unittest.TestCase):
         self.assertEqual(scene['nearby_aircraft'][0]['traffic_severity'], 'imminent')
         self.assertEqual(scene['traffic_alerts'][0]['severity'], 'imminent')
 
+    def test_build_scene_marks_distant_intruder_as_safe(self):
+        repo = _DroneRepoStub()
+        repo.list_live_drones = lambda **kwargs: [
+            {
+                'drone_id': 'MOCK-ALPHA',
+                'latitude': 46.7712,
+                'longitude': 23.6236,
+                'altitude': 80.0,
+                'heading': 90.0,
+                'pitch': 0.0,
+                'roll': 0.0,
+                'speed': 12.0,
+                'status': 'flying',
+                'flight_plan_public_id': 'FP-ALPHA',
+                'owner_email': 'pilot@example.com',
+            },
+            {
+                'drone_id': 'TRAFFIC-LRCL-01',
+                'latitude': 46.7810,
+                'longitude': 23.6515,
+                'altitude': 86.0,
+                'heading': 210.0,
+                'pitch': 0.0,
+                'roll': 0.0,
+                'speed': 10.0,
+                'status': 'flying',
+                'flight_plan_public_id': 'FP-TRAFFIC-SAFE',
+                'owner_email': 'traffic-demo@romatsa.local',
+                'owner_display_name': 'ROMATSA Traffic Demo',
+            },
+        ]
+        service = Drone3DSceneService(
+            drone_repo=repo,
+            airspace_query_service=_AirspaceQueryStub(),
+        )
+
+        scene = service.build_scene('MOCK-ALPHA', owner_email='pilot@example.com', radius_km=5.0, admin_view=False)
+
+        self.assertEqual(scene['nearby_aircraft'][0]['traffic_severity'], 'safe')
+        self.assertEqual(scene['traffic_alerts'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

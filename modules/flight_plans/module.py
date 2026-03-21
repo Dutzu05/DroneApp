@@ -30,6 +30,12 @@ class FlightPlansModule:
     def cancel(self, public_id: str, owner: dict[str, Any]) -> dict[str, Any]:
         return cancel_flight_plan(public_id, owner, repo=self.repo)
 
+    def approve(self, public_id: str, *, approver_email: str, note: str = '') -> dict[str, Any]:
+        approved = self.repo.approve(public_id, approver_email=approver_email, note=note)
+        if not approved:
+            raise ValueError("Flight plan cannot be approved")
+        return approved
+
     def get(self, public_id: str, *, owner_email: str | None = None) -> dict[str, Any] | None:
         return self.repo.get(public_id, owner_email=owner_email)
 
@@ -44,6 +50,7 @@ def build_flight_plans_module(
     list_plans_repo: Callable[..., list[dict[str, Any]]],
     get_plan_repo: Callable[..., dict[str, Any] | None],
     cancel_plan_repo: Callable[..., dict[str, Any] | None],
+    approve_plan_repo: Callable[..., dict[str, Any] | None],
     build_flight_plan: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
     build_anexa_payload: Callable[[dict[str, Any]], dict[str, Any]],
     generate_pdf: Callable[[dict[str, Any], Path], Path],
@@ -58,6 +65,7 @@ def build_flight_plans_module(
             list_plans=list_plans_repo,
             get_plan=get_plan_repo,
             cancel_plan=cancel_plan_repo,
+            approve_plan=approve_plan_repo,
         ),
         gateway=FlightPlanGateway(
             build_flight_plan=build_flight_plan,

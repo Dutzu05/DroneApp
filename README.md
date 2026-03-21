@@ -17,10 +17,10 @@
 
 ## Windows Quick Start
 1. Open a new PowerShell window after installing Docker Desktop, Git, and Node.js so the updated `PATH` is picked up.
-2. Load the project environment:
-   `.\scripts\dev-env.ps1`
-3. Start the Docker stack:
-   `.\scripts\docker-compose.ps1 up --build`
+2. Store the Cesium ion token once for the current Windows user:
+   `.\scripts\set-cesium-ion-token.ps1 -Token <your-token>`
+3. Start the Docker stack with the protected token auto-loaded:
+   `.\scripts\start-app.ps1`
 4. In a second PowerShell window, load the environment again and resolve Flutter packages:
    `.\scripts\dev-env.ps1`
    `Set-Location mobile_app`
@@ -29,6 +29,8 @@
 Notes:
 - If Flutter reports that plugin builds require symlink support, enable Windows Developer Mode and restart your terminal.
 - The Windows flow uses Docker Compose for PostgreSQL/PostGIS instead of the Bash-only local socket scripts.
+- `.\scripts\dev-env.ps1` and `.\scripts\docker-compose.ps1` both auto-load the protected Cesium ion token if it has been stored.
+- The protected token is user-scoped. If you start the app from a different Windows user or elevated context, store the token again in that same context.
 
 ## DB Connection
 - `PGHOST=/home/vlad/Projects/Drone/.postgres/run`
@@ -104,6 +106,8 @@ Start server:
   - `GET /api/drones/<drone_id>/scene-3d`
 - Optional terrain relief token:
   - env var `DRONE_CESIUM_ION_TOKEN`
+- Windows local secret helper:
+  - `.\scripts\set-cesium-ion-token.ps1 -Token <your-token>`
 - If `DRONE_CESIUM_ION_TOKEN` is not set, 3D still opens with imagery and airspace, but Cesium terrain and photorealistic 3D tiles stay disabled.
 
 ## Backend Architecture

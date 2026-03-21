@@ -71,6 +71,7 @@ from backend_auth import (
 )
 from flight_plan_repository import (
     FlightPlanRepositoryError,
+    approve_flight_plan as _approve_flight_plan_db,
     cancel_flight_plan as _cancel_flight_plan_db,
     create_flight_plan as _store_flight_plan,
     get_flight_plan as _get_flight_plan,
@@ -247,7 +248,12 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
     .badge.low { background: #238636; color: #fff; }
     .badge.medium { background: #d29922; color: #111; }
     .badge.high { background: #da3633; color: #fff; }
+    .badge.not_required, .badge.approved { background: #238636; color: #fff; }
+    .badge.pending { background: #d29922; color: #111; }
+    .badge.rejected { background: #da3633; color: #fff; }
     .empty { color: #98a2b3; text-align: center; padding: 20px; }
+    button { border: 1px solid #3b465b; background: #1f6feb; color: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+    button[disabled] { opacity: .55; cursor: not-allowed; }
     a { color: #58a6ff; }
   </style>
 </head>
@@ -265,7 +271,9 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
         <th>Location</th>
         <th>TWR</th>
         <th>Risk</th>
+        <th>Approval</th>
         <th>PDF</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody id=\"rows\"></tbody>
@@ -273,6 +281,20 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
   <script>
     function badge(label, klass) {
       return `<span class=\"badge ${klass}\">${label}</span>`;
+    }
+
+    async function approveFlightPlan(publicId) {
+      const res = await fetch('/api/admin/flight-plans/' + encodeURIComponent(publicId) + '/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approver_email: 'admin@local' }),
+      });
+      const data = await res.json().catch(function() { return {}; });
+      if (!res.ok) {
+        alert(data.error || 'Failed to grant permission.');
+        return;
+      }
+      loadRows();
     }
 
     async function loadRows() {
@@ -287,7 +309,7 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
       rows.innerHTML = '';
       if (plans.length === 0) {
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td class=\"empty\" colspan=\"7\">No flight plans stored yet.</td>';
+        tr.innerHTML = '<td class=\"empty\" colspan=\"9\">No flight plans stored yet.</td>';
         rows.appendChild(tr);
         return;
       }
@@ -296,9 +318,13 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
         const tr = document.createElement('tr');
         const runtimeState = (plan.runtime_state || 'upcoming').toLowerCase();
         const riskState = (plan.risk_level || 'LOW').toLowerCase();
+        const approvalState = (plan.approval_status || 'not_required').toLowerCase();
         const pdfLink = plan.public_id
           ? `<a href=\"/api/flight-plans/${plan.public_id}/pdf\" target=\"_blank\">Download PDF</a>`
           : '-';
+        const actionHtml = approvalState === 'pending'
+          ? `<button type=\"button\" onclick=\"approveFlightPlan('${plan.public_id || ''}')\">Grant permission</button>`
+          : '<span class=\"muted\">-</span>';
 
         tr.innerHTML = `
           <td>
@@ -322,7 +348,12 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
             <div>${badge(plan.risk_level || 'LOW', riskState)}</div>
             <div class=\"muted\">${plan.risk_summary || ''}</div>
           </td>
+          <td>
+            <div>${badge(plan.approval_status || 'not_required', approvalState)}</div>
+            <div class=\"muted\">${plan.approved_by_email || ''}</div>
+          </td>
           <td>${pdfLink}</td>
+          <td>${actionHtml}</td>
         `;
         rows.appendChild(tr);
       }
@@ -588,10 +619,16 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       if (normalized === 'activated' || normalized === 'ongoing' || normalized === 'upcoming' || normalized === 'low') {
         return badge(value, 'ok');
       }
+      if (normalized === 'approved' || normalized === 'not_required') {
+        return badge(value, 'ok');
+      }
+      if (normalized === 'pending') {
+        return badge(value, 'warn');
+      }
       if (normalized === 'duplicate' || normalized === 'completed' || normalized === 'medium') {
         return badge(value, 'warn');
       }
-      if (normalized === 'failed' || normalized === 'error' || normalized === 'cancelled' || normalized === 'high') {
+      if (normalized === 'failed' || normalized === 'error' || normalized === 'cancelled' || normalized === 'high' || normalized === 'rejected') {
         return badge(value, 'danger');
       }
       return badge(value, 'info');
@@ -663,6 +700,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             </td>
             <td class=\"stack\">
               <span>${statusBadge(riskLevel)}</span>
+              <span class=\"small\">${statusBadge(plan.approval_status || 'not_required')}</span>
               <span class=\"small\">${formatValue(plan.risk_summary)}</span>
             </td>
           </tr>
@@ -927,7 +965,6 @@ HTML = b"""<!DOCTYPE html>
     align-items: center; gap: 8px; flex-wrap: wrap;
   }
   .sb-header h1 { font-size: 0.95rem; font-weight: 700; color: var(--accent); flex: 1; }
-  .sb-header .flag { font-size: 1.2rem; }
   .auth-user {
     width: 100%; display: flex; align-items: center; justify-content: space-between;
     gap: 12px; padding-top: 8px; border-top: 1px solid rgba(48,54,61,.7);
@@ -1020,6 +1057,10 @@ HTML = b"""<!DOCTYPE html>
     color: var(--text); margin-top: 10px;
   }
   .my-plans-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .plan-section-title {
+    margin: 2px 0 4px; font-size: .7rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted);
+  }
   .my-plan-card {
     border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
     padding: 10px; font-size: 0.77rem;
@@ -1047,6 +1088,17 @@ HTML = b"""<!DOCTYPE html>
   .mini-btn-danger:hover {
     border-color: #e94560; background: rgba(233,69,96,.12);
   }
+  .history-toggle {
+    width: 100%; display: flex; align-items: center; justify-content: center;
+    gap: 8px; margin-top: 2px;
+  }
+  .history-toggle::before,
+  .history-toggle::after {
+    content: ''; flex: 1; height: 1px; background: rgba(48,54,61,.9);
+  }
+  .history-list {
+    display: flex; flex-direction: column; gap: 8px;
+  }
   .status-pill {
     display: inline-block; padding: 2px 8px; border-radius: 999px;
     font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
@@ -1055,6 +1107,9 @@ HTML = b"""<!DOCTYPE html>
   .status-ongoing { background: rgba(88,166,255,.18); color: #b4d8ff; }
   .status-completed { background: rgba(139,148,158,.18); color: #c9d1d9; }
   .status-cancelled { background: rgba(233,69,96,.18); color: #ffb4ab; }
+  .status-not_required, .status-approved { background: rgba(63,185,80,.18); color: #8ef0a3; }
+  .status-pending { background: rgba(210,153,34,.18); color: #ffd48a; }
+  .status-rejected { background: rgba(233,69,96,.18); color: #ffb4ab; }
   .risk-pill {
     display: inline-block; padding: 2px 8px; border-radius: 999px;
     font-size: 0.68rem; font-weight: 700;
@@ -1193,12 +1248,11 @@ HTML = b"""<!DOCTYPE html>
     box-shadow: 0 20px 80px rgba(0,0,0,.6); overflow: hidden;
   }
   .drone3d-head {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
-    padding: 16px 18px 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 16px 18px; border-bottom: 1px solid var(--border);
     background: linear-gradient(180deg, rgba(88,166,255,.08), rgba(13,17,23,0));
   }
-  .drone3d-head h2 { font-size: 1rem; color: #d7ecff; margin-bottom: 4px; }
-  .drone3d-head .sub { color: var(--muted); font-size: .77rem; line-height: 1.45; }
+  .drone3d-head h2 { font-size: 1rem; color: #d7ecff; margin: 0; letter-spacing: .04em; }
   .drone3d-head-actions {
     display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap;
   }
@@ -1207,16 +1261,6 @@ HTML = b"""<!DOCTYPE html>
     color: var(--text); padding: 7px 12px; cursor: pointer; font-weight: 700;
   }
   .drone3d-close:hover { border-color: var(--accent); color: #fff; }
-  .drone3d-meta {
-    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
-    padding: 12px 18px; border-bottom: 1px solid var(--border); background: rgba(22,27,34,.88);
-  }
-  .drone3d-metric {
-    border: 1px solid var(--border); border-radius: 12px; background: rgba(13,17,23,.9);
-    padding: 10px 12px;
-  }
-  .drone3d-metric .label { color: var(--muted); font-size: .69rem; text-transform: uppercase; letter-spacing: .08em; }
-  .drone3d-metric .value { color: #f0f6fc; font-size: .92rem; font-weight: 700; margin-top: 4px; }
   .drone3d-stage {
     position: relative; flex: 1; min-height: 320px; background: #05070a;
   }
@@ -1252,6 +1296,7 @@ HTML = b"""<!DOCTYPE html>
   .drone3d-traffic-panel .panel-severity.imminent { color: #ffb4ab; }
   .drone3d-traffic-panel .panel-severity.possible { color: #ffd48a; }
   .drone3d-traffic-panel .panel-severity.monitor { color: #f7c56e; }
+  .drone3d-traffic-panel .panel-severity.safe { color: #7ee787; }
   .drone3d-traffic-panel .panel-grid {
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 10px;
   }
@@ -1274,14 +1319,12 @@ HTML = b"""<!DOCTYPE html>
     border-radius:8px; padding:10px 12px; font-size:.8rem;
     color:var(--text); margin-bottom:10px; text-align:center;
   }
-  .draw-hint .hint-icon { font-size:1.4rem; display:block; margin-bottom:4px; }
   #fpCircleInfo { font-size:.76rem; color:var(--muted); margin-top:6px; }
 
   @media (max-width: 1100px) {
     :root { --sidebar-w: 320px; }
   }
   @media (max-width: 860px) {
-    .drone3d-meta { grid-template-columns: 1fr 1fr; }
   }
 </style>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -1304,7 +1347,6 @@ HTML = b"""<!DOCTYPE html>
 
 <div id="sidebar">
   <div class="sb-header">
-    <span class="flag">&#127479;&#127476;</span>
     <h1>ROMATSA Mirror</h1>
     <div class="auth-user" id="authUser" hidden>
       <div class="auth-user-meta">
@@ -1318,8 +1360,8 @@ HTML = b"""<!DOCTYPE html>
   <div class="sb-section">
     <h2>View Mode</h2>
     <div class="mode-toggle">
-      <button class="mode-btn active" id="btnDrone" onclick="setMode('drone')">&#128681; Drone</button>
-      <button class="mode-btn" id="btnGA" onclick="setMode('ga')">&#9992;&#65039; GA</button>
+      <button class="mode-btn active" id="btnDrone" onclick="setMode('drone')">Drone</button>
+      <button class="mode-btn" id="btnGA" onclick="setMode('ga')">GA</button>
     </div>
   </div>
 
@@ -1344,7 +1386,7 @@ HTML = b"""<!DOCTYPE html>
 
   <div class="sb-section">
     <h2>Flight Plan</h2>
-    <button class="fp-launch-btn" onclick="launchFlightPlan()">&#9992; New UAS Notification</button>
+    <button class="fp-launch-btn" onclick="launchFlightPlan()">New UAS Notification</button>
     <button class="fp-launch-btn fp-secondary-btn" onclick="loadMyFlightPlans(true)">Refresh My Plans</button>
     <div class="my-plans-list" id="myPlansList">
       <div class="muted">Sign in to load your saved plans.</div>
@@ -1374,20 +1416,11 @@ HTML = b"""<!DOCTYPE html>
 <div id="drone3dOverlay">
   <div id="drone3dShell">
     <div class="drone3d-head">
-      <div>
-        <h2>3D Drone View</h2>
-        <div class="sub" id="drone3dSubtitle">Lazy-loaded Cesium scene around the active drone. 2D map remains unchanged underneath.</div>
-      </div>
+      <h2 id="drone3dTitle">-</h2>
       <div class="drone3d-head-actions">
         <button class="drone3d-close" type="button" onclick="refreshDrone3DAirspaces()">Refresh Airspace</button>
         <button class="drone3d-close" type="button" onclick="closeDrone3D()">Close 3D</button>
       </div>
-    </div>
-    <div class="drone3d-meta" id="drone3dMeta">
-      <div class="drone3d-metric"><div class="label">Drone</div><div class="value">-</div></div>
-      <div class="drone3d-metric"><div class="label">Terrain</div><div class="value">-</div></div>
-      <div class="drone3d-metric"><div class="label">Airspace Volumes</div><div class="value">-</div></div>
-      <div class="drone3d-metric"><div class="label">Nearby Aircraft</div><div class="value">-</div></div>
     </div>
     <div class="drone3d-stage">
       <div id="drone3dCanvas"></div>
@@ -1441,6 +1474,8 @@ let drone3dFetchInFlight = false;
 let drone3dLastScene = null;
 let drone3dRenderedZoneSignature = '';
 let drone3dZonesVisible = false;
+let latestMyFlightPlans = [];
+let flightPlanHistoryExpanded = false;
 const CENTER_BLOCKING_LAYER_KEYS = ['ctr', 'uas_zones', 'notam', 'tma'];
 
 function setMyPlansContent(html) {
@@ -1457,19 +1492,29 @@ function canCancelPlan(plan) {
   return workflowStatus !== 'cancelled' && runtimeState !== 'completed';
 }
 
-function renderMyFlightPlans(plans) {
-  if (!authenticatedUser) {
-    setMyPlansContent('<div class="muted">Sign in to load your saved plans.</div>');
-    return;
-  }
-  if (!plans || !plans.length) {
-    setMyPlansContent('<div class="muted">No saved flight plans yet.</div>');
-    return;
-  }
+function isDemoFlightPlan(plan) {
+  const purpose = String(plan && plan.purpose || '').toLowerCase();
+  const locationName = String(plan && plan.location_name || '').toLowerCase();
+  return purpose.indexOf('demo') >= 0 || locationName.indexOf('demo') >= 0;
+}
 
-  const html = plans.slice(0, 6).map(function(plan) {
+function isPrimaryFlightPlan(plan) {
+  const runtimeState = String(plan && plan.runtime_state || '').toLowerCase();
+  return runtimeState === 'ongoing' || runtimeState === 'upcoming';
+}
+
+function isHistoryFlightPlan(plan) {
+  const runtimeState = String(plan && plan.runtime_state || '').toLowerCase();
+  return runtimeState === 'completed' || runtimeState === 'cancelled';
+}
+
+function renderFlightPlanCard(plan) {
     const runtimeState = (plan.runtime_state || 'upcoming').toLowerCase();
     const riskState = (plan.risk_level || 'LOW').toLowerCase();
+    const approvalState = (plan.approval_status || 'not_required').toLowerCase();
+    const demoPill = isDemoFlightPlan(plan)
+      ? '<span class="status-pill status-ongoing">demo</span>'
+      : '';
     const cancelButton = canCancelPlan(plan)
       ? `<button class="mini-btn mini-btn-danger" type="button" onclick="cancelFlightPlan('${plan.public_id || ''}')">Cancel</button>`
       : '';
@@ -1477,12 +1522,16 @@ function renderMyFlightPlans(plans) {
       '<div class="my-plan-card">' +
         '<div class="plan-top">' +
           '<span class="plan-id">' + (plan.public_id || '') + '</span>' +
-          '<span class="status-pill status-' + runtimeState + '">' + runtimeState + '</span>' +
+          '<div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">' +
+            demoPill +
+            '<span class="status-pill status-' + runtimeState + '">' + runtimeState + '</span>' +
+          '</div>' +
         '</div>' +
         '<div class="plan-meta">' +
           (plan.location_name || '') + '<br/>' +
           (plan.scheduled_start_local || '') + ' -> ' + (plan.scheduled_end_local || '') + '<br/>' +
-          (plan.selected_twr || '') + ' / ' + Math.round(plan.max_altitude_m || 0) + ' m' +
+          (plan.selected_twr || '') + ' / ' + Math.round(plan.max_altitude_m || 0) + ' m<br/>' +
+          'Permission: <span class="status-pill status-' + approvalState + '">' + approvalState.replace('_', ' ') + '</span>' +
         '</div>' +
         '<div class="plan-actions">' +
           '<span class="risk-pill risk-' + riskState + '">' + (plan.risk_level || 'LOW') + '</span>' +
@@ -1493,7 +1542,50 @@ function renderMyFlightPlans(plans) {
         '</div>' +
       '</div>'
     );
-  }).join('');
+}
+
+function toggleFlightPlanHistory() {
+  flightPlanHistoryExpanded = !flightPlanHistoryExpanded;
+  renderMyFlightPlans(latestMyFlightPlans);
+}
+
+function renderMyFlightPlans(plans) {
+  latestMyFlightPlans = Array.isArray(plans) ? plans : [];
+  if (!authenticatedUser) {
+    setMyPlansContent('<div class="muted">Sign in to load your saved plans.</div>');
+    return;
+  }
+  if (!latestMyFlightPlans.length) {
+    setMyPlansContent('<div class="muted">No saved flight plans yet.</div>');
+    return;
+  }
+
+  const primaryPlans = latestMyFlightPlans.filter(isPrimaryFlightPlan);
+  const historyPlans = latestMyFlightPlans.filter(isHistoryFlightPlan);
+  const visiblePrimary = primaryPlans;
+  const visibleHistory = flightPlanHistoryExpanded ? historyPlans : [];
+  let html = '';
+
+  if (visiblePrimary.length) {
+    html += '<div class="plan-section-title">Current</div>';
+    html += visiblePrimary.map(renderFlightPlanCard).join('');
+  } else {
+    html += '<div class="muted">No ongoing or upcoming flight plans.</div>';
+  }
+
+  if (historyPlans.length) {
+    html +=
+      '<div class="history-toggle">' +
+        '<button class="mini-btn" type="button" onclick="toggleFlightPlanHistory()">' +
+          (flightPlanHistoryExpanded ? 'Hide History' : 'History') + ' (' + historyPlans.length + ')' +
+        '</button>' +
+      '</div>';
+    if (flightPlanHistoryExpanded) {
+      html += '<div class="plan-section-title">History</div>';
+      html += '<div class="history-list">' + visibleHistory.map(renderFlightPlanCard).join('') + '</div>';
+    }
+  }
+
   setMyPlansContent(html);
 }
 
@@ -1537,9 +1629,17 @@ function droneMarkerIcon(drone) {
 }
 
 function trafficDroneIcon(drone) {
-  var severity = String(drone.traffic_severity || 'monitor').toLowerCase();
-  var color = severity === 'imminent' ? '#ff6b6b' : (severity === 'possible' ? '#f0b429' : '#f59e0b');
-  var label = severity === 'imminent' ? 'IMMINENT' : (severity === 'possible' ? 'POSSIBLE' : 'TRAFFIC');
+  var severity = String(drone.traffic_severity || 'safe').toLowerCase();
+  var color = severity === 'imminent'
+    ? '#ff6b6b'
+    : (severity === 'possible'
+      ? '#f0b429'
+      : (severity === 'monitor' ? '#f59e0b' : '#3fb950'));
+  var label = severity === 'imminent'
+    ? 'IMMINENT'
+    : (severity === 'possible'
+      ? 'POSSIBLE'
+      : (severity === 'monitor' ? 'MONITOR' : 'SAFE'));
   var heading = Math.round(Number(drone.heading || 0));
   return L.divIcon({
     className: 'traffic-drone-marker',
@@ -1565,7 +1665,7 @@ function renderTrafficDrones(trafficDrones) {
     marker.bindPopup(
       '<strong>' + (drone.drone_id || 'TRAFFIC') + '</strong><br/>' +
       (drone.owner_display_name || drone.owner_email || 'External traffic') + '<br/>' +
-      'Severity ' + String(drone.traffic_severity || 'monitor').toUpperCase() + '<br/>' +
+      'Severity ' + String(drone.traffic_severity || 'safe').toUpperCase() + '<br/>' +
       'H ' + Number(drone.horizontal_distance_m || 0).toFixed(0) + ' m | V ' + Number(drone.vertical_distance_m || 0).toFixed(0) + ' m<br/>' +
       (drone.traffic_notice || '')
     );
@@ -1602,7 +1702,7 @@ function renderDrone3DTrafficPanel(meta) {
     clearDrone3DTrafficPanel();
     return;
   }
-  var severity = String(meta.traffic_severity || 'monitor').toLowerCase();
+  var severity = String(meta.traffic_severity || 'safe').toLowerCase();
   var latestTrack = meta.track && meta.track.length ? meta.track[meta.track.length - 1] : null;
   panel.className = 'drone3d-traffic-panel visible';
   panel.innerHTML = '' +
@@ -1628,20 +1728,9 @@ function renderDrone3DTrafficPanel(meta) {
     '<div class="panel-note">' + (meta.traffic_notice || 'Live traffic telemetry snapshot.') + '</div>';
 }
 
-function setDrone3DMeta(scene) {
-  var buildingsProvider = scene.scene && scene.scene.buildings && scene.scene.buildings.provider ? scene.scene.buildings.provider : 'none';
-  var imageryProvider = scene.scene && scene.scene.imagery && scene.scene.imagery.provider ? scene.scene.imagery.provider : '-';
-  var zoneCount = (scene.zones || []).length;
-  var metrics = [
-    { label: 'Drone', value: (scene.drone && scene.drone.drone_id) || '-' },
-    { label: 'Radius', value: String(Number(scene.scene && scene.scene.radius_km || 0).toFixed(0)) + ' km' },
-    { label: 'Surface', value: imageryProvider + ' + ' + buildingsProvider },
-    { label: 'Airspace Volumes', value: String(zoneCount) + ' visible' },
-    { label: 'Nearby Aircraft', value: String((scene.nearby_aircraft || []).length) },
-  ];
-  document.getElementById('drone3dMeta').innerHTML = metrics.map(function(item) {
-    return '<div class="drone3d-metric"><div class="label">' + item.label + '</div><div class="value">' + item.value + '</div></div>';
-  }).join('');
+function setDrone3DTitle(scene, fallbackDroneId) {
+  var title = scene && scene.drone && scene.drone.drone_id ? scene.drone.drone_id : (fallbackDroneId || '-');
+  document.getElementById('drone3dTitle').textContent = title;
 }
 
 function zoneSceneSignature(scene) {
@@ -1684,7 +1773,7 @@ function syncDrone3DAirspaces(CesiumRef, viewerRef, sceneRef, forceRender) {
     viewer.scene.requestRender();
   }
   if (scene) {
-    setDrone3DMeta(scene);
+    setDrone3DTitle(scene);
   }
 }
 
@@ -1700,6 +1789,7 @@ function closeDrone3D() {
     drone3dRefreshTimer = null;
   }
   drone3dActiveDroneId = '';
+  document.getElementById('drone3dTitle').textContent = '-';
   if (drone3dViewer) {
     drone3dViewer.trackedEntity = undefined;
     clearDrone3DAirspaces(drone3dViewer);
@@ -2170,12 +2260,14 @@ async function renderDroneEntity(Cesium, viewer, drone, scene) {
 async function renderNearbyAircraft(Cesium, viewer, aircraft, scene) {
   removeDrone3DEntities(viewer, ['nearby-aircraft:']);
   for (const drone of (aircraft || [])) {
-    var severity = String(drone.traffic_severity || 'clear').toLowerCase();
+    var severity = String(drone.traffic_severity || 'safe').toLowerCase();
     var color = severity === 'imminent'
       ? Cesium.Color.fromCssColorString('#ff6b6b')
       : (severity === 'possible'
         ? Cesium.Color.fromCssColorString('#f0b429')
-        : Cesium.Color.ORANGE);
+        : (severity === 'monitor'
+          ? Cesium.Color.ORANGE
+          : Cesium.Color.fromCssColorString('#3fb950')));
     var pose = await resolveDronePose(Cesium, viewer, drone, scene);
     var entity = viewer.entities.add({
       id: 'nearby-aircraft:' + String(drone.drone_id || 'unknown'),
@@ -2205,7 +2297,7 @@ async function renderNearbyAircraft(Cesium, viewer, aircraft, scene) {
     entity.__trafficMeta = drone;
     renderDroneHeadingIndicator(Cesium, viewer, drone, pose, {
       idPrefix: 'nearby-aircraft:' + String(drone.drone_id || 'unknown'),
-      color: severity === 'imminent' ? '#ff9b9b' : (severity === 'possible' ? '#ffd070' : '#f7b955'),
+      color: severity === 'imminent' ? '#ff9b9b' : (severity === 'possible' ? '#ffd070' : (severity === 'monitor' ? '#f7b955' : '#8fe3a1')),
       depthFailColor: '#fff1d6',
       width: 5,
       minLength: 85,
@@ -2511,11 +2603,8 @@ async function loadDrone3DScene(droneId, options) {
       throw new Error(scene.error || 'Failed to build the 3D scene.');
     }
     drone3dLastScene = scene;
-    setDrone3DMeta(scene);
-    var radiusKm = Number(scene.scene && scene.scene.radius_km || 5).toFixed(0);
+    setDrone3DTitle(scene, droneId);
     var buildingProvider = scene.scene && scene.scene.buildings && scene.scene.buildings.provider ? scene.scene.buildings.provider : 'none';
-    document.getElementById('drone3dSubtitle').textContent =
-      radiusKm + ' km terrain-following map around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Terrain, buildings, and nearby airspace volumes refresh while the drone is live.';
     var rendered = await renderDrone3DScene(scene, options || {});
     var topTrafficAlert = scene.traffic_alerts && scene.traffic_alerts.length ? scene.traffic_alerts[0] : null;
     if (topTrafficAlert && String(topTrafficAlert.severity || '').toLowerCase() === 'imminent') {
@@ -2552,6 +2641,7 @@ async function openDrone3D(droneId) {
   if (!authenticatedUser || !droneId) return;
   drone3dActiveDroneId = droneId;
   document.getElementById('drone3dOverlay').style.display = 'block';
+  document.getElementById('drone3dTitle').textContent = droneId;
   drone3dStatus('Loading terrain, buildings, and live airspace context around the selected drone...', 'info');
   try {
     await loadDrone3DScene(droneId, { flyTo: true });
@@ -4121,6 +4211,7 @@ function showSavedFlightPlan() {
       '<div class="saved-row"><span>Location</span>' + (fpSavedPlan.location_name || '') + '</div>' +
       '<div class="saved-row"><span>TWR</span>' + (fpSavedPlan.selected_twr || '') + '</div>' +
       '<div class="saved-row"><span>Risk</span>' + (fpSavedPlan.risk_level || 'LOW') + '</div>' +
+      '<div class="saved-row"><span>Permission</span>' + (fpSavedPlan.approval_status || 'not_required') + '</div>' +
       '<div class="saved-row"><span>PDF</span><a href="' + (fpSavedPlan.download_url || '#') + '" target="_blank">Download ANEXA 1 PDF</a></div>' +
     '</div>';
   document.getElementById('fpSavedSummary').innerHTML = html;
@@ -4218,7 +4309,7 @@ window.addEventListener('load', async function() {
 <div id="fpOverlay">
   <div id="fpWizard">
     <div class="wiz-head">
-      <h2>&#9992; UAS Flight Notification (ANEXA 1)</h2>
+      <h2>UAS Flight Notification (ANEXA 1)</h2>
       <button class="close-wiz" onclick="closeFlightPlan()">&times;</button>
     </div>
     <div class="step-indicator">
@@ -4244,7 +4335,6 @@ window.addEventListener('load', async function() {
           </div>
         </div>
         <div class="draw-hint" id="fpDrawHint" style="display:none">
-          <span class="hint-icon">&#128205;</span>
           Use the map to place the requested flight area
         </div>
         <div id="fpCircleFields">
@@ -4536,6 +4626,7 @@ FLIGHT_PLANS_MODULE = build_flight_plans_module(
     list_plans_repo=_list_flight_plans_db,
     get_plan_repo=_get_flight_plan,
     cancel_plan_repo=_cancel_flight_plan_db,
+    approve_plan_repo=_approve_flight_plan_db,
     build_flight_plan=_build_flight_plan,
     build_anexa_payload=_fm.build_anexa_payload,
     generate_pdf=_generate_anexa1_pdf,
@@ -4575,6 +4666,10 @@ def _create_flight_plan_from_payload(payload: dict, owner: dict) -> dict:
 
 def _cancel_owned_flight_plan(public_id: str, owner: dict) -> dict:
     return FLIGHT_PLANS_MODULE.cancel(public_id, owner)
+
+
+def _approve_flight_plan(public_id: str, *, approver_email: str, note: str = '') -> dict:
+    return FLIGHT_PLANS_MODULE.approve(public_id, approver_email=approver_email, note=note)
 
 
 def _list_flight_plans_response(
@@ -4620,9 +4715,10 @@ def _list_live_drones_for_admin() -> list[dict]:
 def _traffic_severity_rank(severity: str) -> int:
     return {
         "clear": 0,
-        "monitor": 1,
-        "possible": 2,
-        "imminent": 3,
+        "safe": 1,
+        "monitor": 2,
+        "possible": 3,
+        "imminent": 4,
     }.get(str(severity or "").lower(), 0)
 
 
@@ -4718,6 +4814,15 @@ _DEMO_FLIGHT_BLUEPRINTS = (
             [26.0415, 44.5260],
         ],
     },
+    {
+        "location_name": "CLUJ Safe Demo",
+        "purpose": "Automatic demo flight for safe traffic separation checks near Cluj",
+        "selected_twr": "LRCL",
+        "area_kind": "circle",
+        "center_lon": 23.6236,
+        "center_lat": 46.7712,
+        "radius_m": 160,
+    },
 )
 
 _TRAFFIC_DEMO_OWNER = {
@@ -4753,6 +4858,17 @@ _TRAFFIC_DEMO_BLUEPRINTS = (
         "radius_m": 180,
         "drone_id": "TRAFFIC-LRAR-01",
         "drone_label": "Traffic Bravo",
+    },
+    {
+        "location_name": "CLUJ Safe Traffic",
+        "purpose": "Automatic external traffic for safe-separation testing near Cluj",
+        "selected_twr": "LRCL",
+        "area_kind": "circle",
+        "center_lon": 23.6515,
+        "center_lat": 46.7810,
+        "radius_m": 160,
+        "drone_id": "TRAFFIC-LRCL-01",
+        "drone_label": "Traffic Cluj Safe",
     },
 )
 
@@ -5284,6 +5400,23 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:
                 self._send(400, "application/json", _json_bytes({"error": str(exc)}))
+
+        elif path.startswith("/api/admin/flight-plans/") and path.endswith("/approve"):
+            public_id = path[len("/api/admin/flight-plans/"):-len("/approve")].strip("/")
+            try:
+                payload = json.loads(raw) if raw else {}
+                approver_email = str((payload or {}).get("approver_email") or "admin@local")
+                note = str((payload or {}).get("note") or "")
+                approved = _approve_flight_plan(public_id, approver_email=approver_email, note=note)
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"ok": True, "flight_plan": approved}, ensure_ascii=False),
+                )
+            except ValueError as exc:
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+            except Exception as exc:
+                self._send(500, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 
         elif path.startswith("/api/flight-plans/") and path.endswith("/cancel"):
             public_id = path[len("/api/flight-plans/"):-len("/cancel")].strip("/")

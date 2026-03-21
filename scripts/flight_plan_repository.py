@@ -174,7 +174,8 @@ def create_flight_plan(owner: dict[str, Any], plan: dict[str, Any]) -> dict[str,
         risk_summary,
         airspace_assessment,
         anexa_payload,
-        pdf_rel_path
+        pdf_rel_path,
+        approval_status
       )
       VALUES (
         {_sql_literal(plan["public_id"])},
@@ -213,7 +214,8 @@ def create_flight_plan(owner: dict[str, Any], plan: dict[str, Any]) -> dict[str,
         {_sql_literal(plan["risk_summary"])},
         {_sql_jsonb(plan["airspace_assessment"])},
         {_sql_jsonb(plan["anexa_payload"])},
-        {_sql_literal(plan["pdf_rel_path"])}
+        {_sql_literal(plan["pdf_rel_path"])},
+        {_sql_literal(plan.get("approval_status", "not_required"))}
       )
       RETURNING *
     )
@@ -229,6 +231,7 @@ def create_flight_plan(owner: dict[str, Any], plan: dict[str, Any]) -> dict[str,
         max_altitude_m,
         risk_level,
         risk_summary,
+        approval_status,
         workflow_status,
         scheduled_start_at,
         scheduled_end_at,
@@ -275,12 +278,17 @@ def list_flight_plans(
         fp.owner_email,
         fp.owner_display_name,
         fp.operator_name,
+        fp.purpose,
         fp.location_name,
         fp.area_kind,
         fp.selected_twr,
         fp.max_altitude_m,
         fp.risk_level,
         fp.risk_summary,
+        fp.approval_status,
+        fp.approved_by_email,
+        fp.approved_at,
+        fp.approval_note,
         fp.workflow_status,
         {_runtime_state_sql("fp")} AS runtime_state,
         fp.scheduled_start_at,
@@ -350,6 +358,10 @@ def get_flight_plan(
         fp.selected_twr,
         fp.risk_level,
         fp.risk_summary,
+        fp.approval_status,
+        fp.approved_by_email,
+        fp.approved_at,
+        fp.approval_note,
         fp.workflow_status,
         {_runtime_state_sql("fp")} AS runtime_state,
         fp.scheduled_start_at,
@@ -398,6 +410,10 @@ def cancel_flight_plan(
         fp.max_altitude_m,
         fp.risk_level,
         fp.risk_summary,
+        fp.approval_status,
+        fp.approved_by_email,
+        fp.approved_at,
+        fp.approval_note,
         fp.workflow_status,
         {_runtime_state_sql("fp")} AS runtime_state,
         fp.scheduled_start_at,
@@ -407,6 +423,55 @@ def cancel_flight_plan(
         fp.local_timezone,
         fp.pdf_rel_path,
         fp.updated_at
+    )
+    SELECT row_to_json(updated) FROM updated;
+    """
+    result = _run_json_query(sql)
+    return result if isinstance(result, dict) else None
+
+
+def approve_flight_plan(
+    public_id: str,
+    *,
+    approver_email: str,
+    note: str = '',
+) -> dict[str, Any] | None:
+    sql = f"""
+    WITH updated AS (
+      UPDATE flight_plans fp
+      SET
+        approval_status = 'approved',
+        approved_by_email = {_sql_literal(approver_email.strip().lower() or 'admin')},
+        approval_note = {_sql_literal(note.strip())},
+        approved_at = NOW(),
+        updated_at = NOW()
+      WHERE fp.public_id = {_sql_literal(public_id)}
+        AND fp.workflow_status <> 'cancelled'
+        AND fp.approval_status = 'pending'
+      RETURNING
+        fp.public_id,
+        fp.owner_email,
+        fp.owner_display_name,
+        fp.operator_name,
+        fp.location_name,
+        fp.area_kind,
+        fp.selected_twr,
+        fp.max_altitude_m,
+        fp.risk_level,
+        fp.risk_summary,
+        fp.approval_status,
+        fp.workflow_status,
+        {_runtime_state_sql("fp")} AS runtime_state,
+        fp.scheduled_start_at,
+        fp.scheduled_end_at,
+        TO_CHAR(fp.scheduled_start_at AT TIME ZONE fp.local_timezone, 'DD.MM.YYYY HH24:MI') AS scheduled_start_local,
+        TO_CHAR(fp.scheduled_end_at AT TIME ZONE fp.local_timezone, 'DD.MM.YYYY HH24:MI') AS scheduled_end_local,
+        fp.local_timezone,
+        fp.pdf_rel_path,
+        fp.updated_at,
+        fp.approved_at,
+        fp.approved_by_email,
+        fp.approval_note
     )
     SELECT row_to_json(updated) FROM updated;
     """

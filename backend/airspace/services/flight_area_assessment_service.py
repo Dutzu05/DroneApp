@@ -44,6 +44,11 @@ def _legacy_zone_payload(zone: dict[str, Any]) -> dict[str, Any]:
     return props
 
 
+def _is_prohibited_payload(payload: dict[str, Any]) -> bool:
+    status = str(payload.get('status') or '').strip().lower()
+    return 'prohibit' in status
+
+
 def _circle_polygon(lon: float, lat: float, radius_m: float, *, steps: int = 48) -> dict[str, Any]:
     lat1 = math.radians(lat)
     lon1 = math.radians(lon)
@@ -129,11 +134,22 @@ class FlightAreaAssessmentService:
             'risk_level': 'LOW',
             'summary': '',
             'eligibility_status': 'ready',
+            'approval_required': False,
+            'approval_possible': True,
+            'prohibited_hits': [],
             'warnings': [],
         }
         for zone in zones:
             payload = _legacy_zone_payload(zone)
             layer_key = _layer_key_for_zone(zone)
+            if _is_prohibited_payload(payload):
+                result['prohibited_hits'].append(
+                    {
+                        **payload,
+                        'layer_key': layer_key,
+                        'label': _label_for_layer_key(layer_key),
+                    }
+                )
             if layer_key == 'ctr':
                 result['ctr_hits'].append(payload)
                 name = (payload.get('name') or payload.get('arsp_name') or '').upper()
@@ -153,6 +169,9 @@ class FlightAreaAssessmentService:
         uas_count = len(result['uas_hits'])
         notam_count = len(result['notam_hits'])
         tma_count = len(result['tma_hits'])
+        prohibited_count = len(result['prohibited_hits'])
+        result['approval_required'] = bool(ctr_count or uas_count or notam_count or tma_count) and prohibited_count == 0
+        result['approval_possible'] = prohibited_count == 0
         if ctr_count or uas_count:
             result['risk_level'] = 'HIGH'
         elif notam_count or tma_count:
@@ -171,11 +190,17 @@ class FlightAreaAssessmentService:
         if not summary_parts:
             summary_parts.append('No conflicting airspace found')
 
-        if uas_count:
+        if prohibited_count:
+            result['eligibility_status'] = 'blocked'
+            result['warnings'].append('Prohibited airspace overlap detected. This flight plan cannot be approved.')
+        elif result['approval_required']:
             result['eligibility_status'] = 'manual_review'
+        if uas_count and prohibited_count == 0:
             result['warnings'].append(
                 'ANEXA 1 notes say open-category flights in CTR are considered authorized only outside restricted UAS geographical zones.'
             )
+        if result['approval_required']:
+            result['warnings'].append('Flight plan enters non-prohibited controlled/restricted airspace and requires admin permission before activation.')
         if result['risk_level'] == 'HIGH':
             result['warnings'].append('High-risk airspace overlap detected. Manual review is required before relying on this plan.')
         elif result['risk_level'] == 'MEDIUM':

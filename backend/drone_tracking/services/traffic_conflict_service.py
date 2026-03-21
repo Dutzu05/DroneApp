@@ -3,6 +3,13 @@ from __future__ import annotations
 import math
 from typing import Any
 
+IMMINENT_HORIZONTAL_M = 120.0
+IMMINENT_VERTICAL_M = 45.0
+POSSIBLE_HORIZONTAL_M = 350.0
+POSSIBLE_VERTICAL_M = 90.0
+MONITOR_HORIZONTAL_M = 1_500.0
+MONITOR_VERTICAL_M = 180.0
+
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radius_m = 6_371_000.0
@@ -17,9 +24,10 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def _severity_rank(severity: str) -> int:
     return {
         'clear': 0,
-        'monitor': 1,
-        'possible': 2,
-        'imminent': 3,
+        'safe': 1,
+        'monitor': 2,
+        'possible': 3,
+        'imminent': 4,
     }.get(str(severity or '').lower(), 0)
 
 
@@ -40,15 +48,15 @@ class TrafficConflictService:
                 float(drone.get('longitude') or 0.0),
             )
             vertical_m = abs(float(drone.get('altitude') or 0.0) - focus_alt)
-            severity = 'clear'
+            severity = 'safe'
             suggestion = ''
-            if horizontal_m <= 120.0 and vertical_m <= 45.0:
+            if horizontal_m <= IMMINENT_HORIZONTAL_M and vertical_m <= IMMINENT_VERTICAL_M:
                 severity = 'imminent'
                 suggestion = 'Descend 20-30 m and keep the intruder on visual watch.'
-            elif horizontal_m <= 350.0 and vertical_m <= 90.0:
+            elif horizontal_m <= POSSIBLE_HORIZONTAL_M and vertical_m <= POSSIBLE_VERTICAL_M:
                 severity = 'possible'
                 suggestion = 'Hold position or widen separation until the closure trend improves.'
-            elif horizontal_m <= 1_500.0 and vertical_m <= 180.0:
+            elif horizontal_m <= MONITOR_HORIZONTAL_M and vertical_m <= MONITOR_VERTICAL_M:
                 severity = 'monitor'
                 suggestion = 'Monitor closure and heading while maintaining visual separation.'
 

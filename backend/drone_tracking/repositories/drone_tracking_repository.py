@@ -17,6 +17,10 @@ def _runtime_state_sql(alias: str = 'fp') -> str:
     """
 
 
+def _approval_active_sql(alias: str = 'fp') -> str:
+    return f"COALESCE({alias}.approval_status, 'not_required') IN ('not_required', 'approved')"
+
+
 class DroneTrackingRepository:
     def get_live_drone(
         self,
@@ -38,7 +42,7 @@ class DroneTrackingRepository:
 
     def list_mock_candidate_plans(self, *, include_upcoming: bool = True) -> list[dict[str, Any]]:
         runtime_state = _runtime_state_sql('fp')
-        where = ["fp.workflow_status = 'planned'", "fp.scheduled_end_at >= NOW()"]
+        where = ["fp.workflow_status = 'planned'", "fp.scheduled_end_at >= NOW()", _approval_active_sql('fp')]
         if not include_upcoming:
             where.append("fp.scheduled_start_at <= NOW()")
         with get_connection() as conn, conn.cursor() as cur:
@@ -205,7 +209,7 @@ class DroneTrackingRepository:
         only_ongoing: bool = False,
     ) -> list[dict[str, Any]]:
         runtime_state = _runtime_state_sql('fp')
-        where = ["fp.workflow_status = 'planned'", "fp.scheduled_end_at >= NOW()"]
+        where = ["fp.workflow_status = 'planned'", "fp.scheduled_end_at >= NOW()", _approval_active_sql('fp')]
         if owner_email:
             where.append("dd.owner_email = %s")
         if only_ongoing:
@@ -303,7 +307,7 @@ class DroneTrackingRepository:
     def count_live_drones(self, *, only_ongoing: bool = True) -> int:
         with get_connection() as conn, conn.cursor() as cur:
             runtime_state = _runtime_state_sql('fp')
-            where = ["fp.workflow_status = 'planned'", "fp.scheduled_end_at >= NOW()"]
+            where = ["fp.workflow_status = 'planned'", "fp.scheduled_end_at >= NOW()", _approval_active_sql('fp')]
             if only_ongoing:
                 where.append(f"{runtime_state} = 'ongoing'")
             cur.execute(

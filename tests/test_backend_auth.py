@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import tempfile
+import shutil
 import unittest
+import uuid
 from pathlib import Path
 
 from scripts import backend_auth
@@ -9,16 +10,17 @@ from scripts import backend_auth
 
 class BackendAuthTest(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path.cwd() / '.tmp' / f'backend-auth-test-{uuid.uuid4().hex}'
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
         self.original_data_dir = backend_auth.DATA_DIR
         self.original_secret_file = backend_auth.SESSION_SECRET_FILE
-        backend_auth.DATA_DIR = Path(self.tmp_dir.name)
+        backend_auth.DATA_DIR = self.tmp_dir
         backend_auth.SESSION_SECRET_FILE = backend_auth.DATA_DIR / 'session_secret'
 
     def tearDown(self):
         backend_auth.DATA_DIR = self.original_data_dir
         backend_auth.SESSION_SECRET_FILE = self.original_secret_file
-        self.tmp_dir.cleanup()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_create_and_decode_session_token(self):
         token = backend_auth.create_session_token({

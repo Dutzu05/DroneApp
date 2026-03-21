@@ -4,6 +4,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'secrets.ps1')
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $flutterBin = Join-Path $repoRoot '.tooling\flutter\bin'
 
@@ -34,6 +36,15 @@ $env:PGUSER = 'drone'
 $env:PGPASSWORD = 'drone'
 $env:DRONE_DB_NAME = 'drone_app'
 
+$loadedProtectedCesiumIonToken = $false
+if ([string]::IsNullOrWhiteSpace($env:DRONE_CESIUM_ION_TOKEN)) {
+    $storedCesiumIonToken = Get-DroneCesiumIonToken
+    if ($storedCesiumIonToken) {
+        $env:DRONE_CESIUM_ION_TOKEN = $storedCesiumIonToken
+        $loadedProtectedCesiumIonToken = $true
+    }
+}
+
 if ($PersistForUser) {
     $userPathEntries = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
     foreach ($candidate in $candidatePaths) {
@@ -50,6 +61,10 @@ Write-Host "PGHOST=$env:PGHOST"
 Write-Host "PGPORT=$env:PGPORT"
 Write-Host "PGUSER=$env:PGUSER"
 Write-Host "DRONE_DB_NAME=$env:DRONE_DB_NAME"
+Write-Host ("DRONE_CESIUM_ION_TOKEN=" + $(if ([string]::IsNullOrWhiteSpace($env:DRONE_CESIUM_ION_TOKEN)) { 'missing' } else { 'configured' }))
+if ($loadedProtectedCesiumIonToken) {
+    Write-Host "Loaded protected Cesium ion token from $(Get-DroneCesiumIonTokenSecretPath)"
+}
 Write-Host ''
 Write-Host 'Resolved tools in this session:'
 $gitCommand = Get-Command git -ErrorAction SilentlyContinue

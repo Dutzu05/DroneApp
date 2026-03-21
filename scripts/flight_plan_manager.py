@@ -585,6 +585,11 @@ def find_blocking_center_hits(lon: float, lat: float, alt_m: float) -> list[dict
     return _airspace_service().blocking_center_hits(lon=lon, lat=lat, alt_m=alt_m)
 
 
+def _is_prohibited_airspace_hit(hit: dict[str, Any]) -> bool:
+    status = str(hit.get("status") or "").strip().lower()
+    return "prohibit" in status
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Layer access
 # ──────────────────────────────────────────────────────────────────────────
@@ -814,15 +819,18 @@ def validate_and_build_flight_plan(
     start_local, end_local, pdf_start_date, pdf_end_date = _parse_schedule(payload, now=now)
 
     assessment = assess_flight_area(area, max_altitude_m)
-    if area["kind"] == "circle":
-        center_hits = find_blocking_center_hits(area["center_lon"], area["center_lat"], max_altitude_m)
-        if center_hits:
-            labels = ", ".join(f"{hit['label']}: {hit['name']}" for hit in center_hits[:4])
-            if len(center_hits) > 4:
-                labels += ", ..."
-            raise FlightPlanValidationError(
-                f"Circle centre cannot be placed inside restricted airspace ({labels})"
-            )
+    prohibited_hits = [hit for hit in (assessment.get("prohibited_hits") or []) if _is_prohibited_airspace_hit(hit)]
+    if prohibited_hits:
+        labels = ", ".join(
+            f"{hit.get('label') or hit.get('layer_key') or 'AIRSPACE'}: {hit.get('name') or hit.get('zone_id') or 'unknown'}"
+            for hit in prohibited_hits[:4]
+        )
+        if len(prohibited_hits) > 4:
+            labels += ", ..."
+        raise FlightPlanValidationError(
+            f"Flight plan enters prohibited airspace ({labels})"
+        )
+    approval_status = "pending" if assessment.get("approval_required") else "not_required"
 
     return {
         "public_id": _build_public_id(now),
@@ -864,6 +872,7 @@ def validate_and_build_flight_plan(
         "risk_level": assessment["risk_level"],
         "risk_summary": assessment["summary"],
         "airspace_assessment": assessment,
+        "approval_status": approval_status,
         "created_from_app": _clean_text(payload.get("created_from_app")) or "visualise_zones_web",
     }
 

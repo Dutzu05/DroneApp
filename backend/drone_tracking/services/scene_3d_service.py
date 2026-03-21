@@ -200,13 +200,13 @@ class Drone3DSceneService:
             {
                 **aircraft,
                 **nearby_by_id.get(str(aircraft.get('drone_id') or ''), {}),
-                'traffic_severity': nearby_by_id.get(str(aircraft.get('drone_id') or ''), {}).get('traffic_severity', 'clear'),
+                'traffic_severity': nearby_by_id.get(str(aircraft.get('drone_id') or ''), {}).get('traffic_severity', 'safe'),
             }
             for aircraft in nearby_aircraft
         ]
         nearby_aircraft.sort(
             key=lambda item: (
-                {'imminent': 0, 'possible': 1, 'monitor': 2, 'clear': 3}.get(str(item.get('traffic_severity') or 'clear'), 4),
+                {'imminent': 0, 'possible': 1, 'monitor': 2, 'safe': 3, 'clear': 4}.get(str(item.get('traffic_severity') or 'clear'), 5),
                 float(item.get('distance_m') or 0.0),
             )
         )

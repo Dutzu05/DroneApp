@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-import tempfile
+import shutil
 import unittest
+import uuid
 from pathlib import Path
 
 from modules.flight_plans.module import build_flight_plans_module
 
 
 class FlightPlansModuleTest(unittest.TestCase):
+    def _workspace_temp_dir(self) -> Path:
+        path = Path.cwd() / '.tmp' / f'flight-plan-test-{uuid.uuid4().hex}'
+        path.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(path, ignore_errors=True))
+        return path
+
     def _build_module(self, pdf_dir: Path, *, repo_should_fail: bool = False):
         class FakeRepo:
             def __init__(self):
@@ -52,6 +59,17 @@ class FlightPlansModuleTest(unittest.TestCase):
                     'owner_email': owner_email,
                 }
 
+            def approve(self, public_id, *, approver_email, note=''):
+                return {
+                    'public_id': public_id,
+                    'workflow_status': 'planned',
+                    'runtime_state': 'upcoming',
+                    'owner_email': 'pilot@example.com',
+                    'approval_status': 'approved',
+                    'approved_by_email': approver_email,
+                    'approval_note': note,
+                }
+
         class FakeGateway:
             def build_plan(self, payload, owner):
                 return {
@@ -84,6 +102,7 @@ class FlightPlansModuleTest(unittest.TestCase):
             list_plans_repo=repo.list,
             get_plan_repo=repo.get,
             cancel_plan_repo=repo.cancel,
+            approve_plan_repo=repo.approve,
             build_flight_plan=gateway.build_plan,
             build_anexa_payload=gateway.build_pdf_payload,
             generate_pdf=gateway.generate_pdf,
@@ -95,37 +114,37 @@ class FlightPlansModuleTest(unittest.TestCase):
         return module, repo
 
     def test_create_enriches_and_persists_plan(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            module, repo = self._build_module(Path(tmp_dir) / '.data' / 'flight_plans')
+        tmp_dir = self._workspace_temp_dir()
+        module, repo = self._build_module(tmp_dir / 'data' / 'flight_plans')
 
-            result = module.create({'location_name': 'Zone A', 'selected_twr': 'LROP'}, {'email': 'pilot@example.com'})
+        result = module.create({'location_name': 'Zone A', 'selected_twr': 'LROP'}, {'email': 'pilot@example.com'})
 
-            self.assertEqual(result['public_id'], 'FP-TEST-1')
-            self.assertTrue(result['download_url'].endswith('/api/flight-plans/FP-TEST-1/pdf'))
-            self.assertTrue(result['can_cancel'])
-            self.assertEqual(len(repo.created), 1)
+        self.assertEqual(result['public_id'], 'FP-TEST-1')
+        self.assertTrue(result['download_url'].endswith('/api/flight-plans/FP-TEST-1/pdf'))
+        self.assertTrue(result['can_cancel'])
+        self.assertEqual(len(repo.created), 1)
 
     def test_create_removes_pdf_if_repo_fails(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            pdf_dir = Path(tmp_dir) / '.data' / 'flight_plans'
-            module, _ = self._build_module(pdf_dir, repo_should_fail=True)
+        tmp_dir = self._workspace_temp_dir()
+        pdf_dir = tmp_dir / 'data' / 'flight_plans'
+        module, _ = self._build_module(pdf_dir, repo_should_fail=True)
 
-            with self.assertRaises(RuntimeError):
-                module.create({'location_name': 'Zone A', 'selected_twr': 'LROP'}, {'email': 'pilot@example.com'})
+        with self.assertRaises(RuntimeError):
+            module.create({'location_name': 'Zone A', 'selected_twr': 'LROP'}, {'email': 'pilot@example.com'})
 
-            self.assertFalse((pdf_dir / 'FP-TEST-1.pdf').exists())
+        self.assertFalse((pdf_dir / 'FP-TEST-1.pdf').exists())
 
     def test_list_and_cancel_enrich_results(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            module, repo = self._build_module(Path(tmp_dir) / '.data' / 'flight_plans')
+        tmp_dir = self._workspace_temp_dir()
+        module, repo = self._build_module(tmp_dir / 'data' / 'flight_plans')
 
-            listed = module.list(owner_email='pilot@example.com', include_past=True, include_cancelled=True)
-            cancelled = module.cancel('FP-1', {'email': 'pilot@example.com'})
+        listed = module.list(owner_email='pilot@example.com', include_past=True, include_cancelled=True)
+        cancelled = module.cancel('FP-1', {'email': 'pilot@example.com'})
 
-            self.assertEqual(listed[0]['download_url'], '/api/flight-plans/FP-1/pdf')
-            self.assertTrue(listed[0]['can_cancel'])
-            self.assertFalse(cancelled['can_cancel'])
-            self.assertEqual(repo.cancelled[0], ('FP-1', 'pilot@example.com'))
+        self.assertEqual(listed[0]['download_url'], '/api/flight-plans/FP-1/pdf')
+        self.assertTrue(listed[0]['can_cancel'])
+        self.assertFalse(cancelled['can_cancel'])
+        self.assertEqual(repo.cancelled[0], ('FP-1', 'pilot@example.com'))
 
 
 if __name__ == '__main__':

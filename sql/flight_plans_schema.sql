@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS flight_plans (
   airspace_assessment JSONB NOT NULL,
   anexa_payload JSONB NOT NULL,
   pdf_rel_path TEXT NOT NULL,
+  approval_status TEXT NOT NULL DEFAULT 'not_required' CHECK (approval_status IN ('not_required', 'pending', 'approved', 'rejected')),
+  approved_by_email TEXT,
+  approval_note TEXT,
+  approved_at TIMESTAMPTZ,
   workflow_status TEXT NOT NULL DEFAULT 'planned' CHECK (workflow_status IN ('planned', 'cancelled')),
   cancelled_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -73,5 +77,31 @@ CREATE TABLE IF NOT EXISTS flight_plans (
 CREATE INDEX IF NOT EXISTS idx_flight_plans_owner_email ON flight_plans(owner_email);
 CREATE INDEX IF NOT EXISTS idx_flight_plans_schedule ON flight_plans(scheduled_start_at, scheduled_end_at);
 CREATE INDEX IF NOT EXISTS idx_flight_plans_workflow_status ON flight_plans(workflow_status);
+CREATE INDEX IF NOT EXISTS idx_flight_plans_approval_status ON flight_plans(approval_status);
 CREATE INDEX IF NOT EXISTS idx_flight_plans_selected_twr ON flight_plans(selected_twr);
 CREATE INDEX IF NOT EXISTS idx_flight_plans_area_geojson_gin ON flight_plans USING GIN (area_geojson);
+
+ALTER TABLE flight_plans
+  ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'not_required';
+
+ALTER TABLE flight_plans
+  ADD COLUMN IF NOT EXISTS approved_by_email TEXT;
+
+ALTER TABLE flight_plans
+  ADD COLUMN IF NOT EXISTS approval_note TEXT;
+
+ALTER TABLE flight_plans
+  ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'flight_plans_approval_status_check'
+  ) THEN
+    ALTER TABLE flight_plans
+      ADD CONSTRAINT flight_plans_approval_status_check
+      CHECK (approval_status IN ('not_required', 'pending', 'approved', 'rejected'));
+  END IF;
+END $$;

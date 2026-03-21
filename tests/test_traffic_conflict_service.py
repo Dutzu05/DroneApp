@@ -6,6 +6,30 @@ from backend.drone_tracking.services.traffic_conflict_service import TrafficConf
 
 
 class TrafficConflictServiceTests(unittest.TestCase):
+    def test_marks_safe_for_non_threatening_intruder(self):
+        service = TrafficConflictService()
+
+        result = service.evaluate_conflicts(
+            focus_drone={
+                'drone_id': 'FOCUS-1',
+                'latitude': 46.7712,
+                'longitude': 23.6236,
+                'altitude': 82.0,
+            },
+            other_drones=[
+                {
+                    'drone_id': 'TRAFFIC-LRCL-01',
+                    'latitude': 46.7810,
+                    'longitude': 23.6515,
+                    'altitude': 88.0,
+                }
+            ],
+        )
+
+        self.assertEqual(result['traffic'][0]['traffic_severity'], 'safe')
+        self.assertEqual(result['alerts'], [])
+        self.assertEqual(result['top_severity'], 'safe')
+
     def test_marks_imminent_for_close_intruder(self):
         service = TrafficConflictService()
 
