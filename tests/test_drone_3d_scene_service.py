@@ -112,6 +112,8 @@ class Drone3DSceneServiceTests(unittest.TestCase):
         self.assertEqual(len(scene['drone']['track']), 2)
         self.assertEqual(len(scene['nearby_aircraft']), 1)
         self.assertEqual(scene['nearby_aircraft'][0]['drone_id'], 'MOCK-BRAVO')
+        self.assertEqual(scene['nearby_aircraft'][0]['traffic_severity'], 'monitor')
+        self.assertEqual(len(scene['traffic_alerts']), 0)
         self.assertEqual(len(scene['zones']), 1)
         self.assertEqual(scene['zones'][0]['zone_id'], 'ctr-clj')
         self.assertEqual(scene['zones'][0]['color'], '#58a6ff')
@@ -169,6 +171,47 @@ class Drone3DSceneServiceTests(unittest.TestCase):
         first = scene['zones'][0]['geometry']['coordinates'][0][0]
         self.assertAlmostEqual(first[0], 26.0, places=1)
         self.assertAlmostEqual(first[1], 44.5, places=1)
+
+    def test_build_scene_includes_imminent_traffic_alerts_for_close_intruder(self):
+        repo = _DroneRepoStub()
+        repo.list_live_drones = lambda **kwargs: [
+            {
+                'drone_id': 'MOCK-ALPHA',
+                'latitude': 46.7712,
+                'longitude': 23.6236,
+                'altitude': 80.0,
+                'heading': 90.0,
+                'pitch': 0.0,
+                'roll': 0.0,
+                'speed': 12.0,
+                'status': 'flying',
+                'flight_plan_public_id': 'FP-ALPHA',
+                'owner_email': 'pilot@example.com',
+            },
+            {
+                'drone_id': 'TRAFFIC-1',
+                'latitude': 46.7712,
+                'longitude': 23.6244,
+                'altitude': 86.0,
+                'heading': 270.0,
+                'pitch': 0.0,
+                'roll': 0.0,
+                'speed': 12.0,
+                'status': 'flying',
+                'flight_plan_public_id': 'FP-TRAFFIC',
+                'owner_email': 'traffic@example.com',
+                'owner_display_name': 'Traffic Demo',
+            },
+        ]
+        service = Drone3DSceneService(
+            drone_repo=repo,
+            airspace_query_service=_AirspaceQueryStub(),
+        )
+
+        scene = service.build_scene('MOCK-ALPHA', owner_email='pilot@example.com', radius_km=10.0, admin_view=False)
+
+        self.assertEqual(scene['nearby_aircraft'][0]['traffic_severity'], 'imminent')
+        self.assertEqual(scene['traffic_alerts'][0]['severity'], 'imminent')
 
 
 if __name__ == '__main__':

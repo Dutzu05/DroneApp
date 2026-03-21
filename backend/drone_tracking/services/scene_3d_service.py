@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from backend.airspace.validators.geometry_validator import GeometryValidationError, validate_geometry
+from backend.drone_tracking.services.traffic_conflict_service import TrafficConflictService
 
 
 def _meters_per_lon_degree(lat: float) -> float:
@@ -85,10 +86,11 @@ def _region_bounds(lat: float, lon: float, *, radius_m: float) -> dict[str, floa
 
 
 class Drone3DSceneService:
-    def __init__(self, *, drone_repo, airspace_query_service, cesium_ion_token: str = ''):
+    def __init__(self, *, drone_repo, airspace_query_service, cesium_ion_token: str = '', traffic_conflict_service: TrafficConflictService | None = None):
         self.drone_repo = drone_repo
         self.airspace_query_service = airspace_query_service
         self.cesium_ion_token = cesium_ion_token.strip()
+        self.traffic_conflict_service = traffic_conflict_service or TrafficConflictService()
 
     def _mock_obstacles(self, focus_drone: dict[str, Any], *, radius_km: float) -> list[dict[str, Any]]:
         drone_id = str(focus_drone.get('drone_id') or '')
@@ -183,9 +185,31 @@ class Drone3DSceneService:
                     {
                         **drone,
                         'distance_m': round(distance_m, 1),
+                        'track': self.drone_repo.telemetry_history(str(drone.get('drone_id') or ''), limit=12),
                     }
                 )
-        nearby_aircraft.sort(key=lambda item: item['distance_m'])
+        traffic_assessment = self.traffic_conflict_service.evaluate_conflicts(
+            focus_drone=focus_drone,
+            other_drones=nearby_aircraft,
+        )
+        nearby_by_id = {
+            str(item.get('drone_id') or ''): item
+            for item in traffic_assessment.get('traffic', [])
+        }
+        nearby_aircraft = [
+            {
+                **aircraft,
+                **nearby_by_id.get(str(aircraft.get('drone_id') or ''), {}),
+                'traffic_severity': nearby_by_id.get(str(aircraft.get('drone_id') or ''), {}).get('traffic_severity', 'clear'),
+            }
+            for aircraft in nearby_aircraft
+        ]
+        nearby_aircraft.sort(
+            key=lambda item: (
+                {'imminent': 0, 'possible': 1, 'monitor': 2, 'clear': 3}.get(str(item.get('traffic_severity') or 'clear'), 4),
+                float(item.get('distance_m') or 0.0),
+            )
+        )
 
         zones_response = self.airspace_query_service.get_zones_near(
             lat=focus_lat,
@@ -209,6 +233,7 @@ class Drone3DSceneService:
                 'track': track,
             },
             'nearby_aircraft': nearby_aircraft,
+            'traffic_alerts': traffic_assessment.get('alerts', []),
             'obstacles': self._mock_obstacles(focus_drone, radius_km=radius_km),
             'zones': zones,
             'scene': {

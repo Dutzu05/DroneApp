@@ -57,6 +57,7 @@ from backend.airspace.services.admin_overview_service import AirspaceAdminOvervi
 from backend.drone_tracking.repositories.drone_tracking_repository import DroneTrackingRepository
 from backend.drone_tracking.services.mock_telemetry_service import DroneMockTelemetryService
 from backend.drone_tracking.services.scene_3d_service import Drone3DSceneService
+from backend.drone_tracking.services.traffic_conflict_service import TrafficConflictService
 from backend.airspace.services.airspace_query_service import (
     build_airspace_query_service,
     normalize_categories as _normalize_airspace_categories,
@@ -130,10 +131,12 @@ AIRSPACE_ADMIN_OVERVIEW_SERVICE = AirspaceAdminOverviewService(
 )
 DRONE_TRACKING_REPO = DroneTrackingRepository()
 DRONE_MOCK_TELEMETRY_SERVICE = DroneMockTelemetryService(DRONE_TRACKING_REPO)
+TRAFFIC_CONFLICT_SERVICE = TrafficConflictService()
 DRONE_3D_SCENE_SERVICE = Drone3DSceneService(
     drone_repo=DRONE_TRACKING_REPO,
     airspace_query_service=AIRSPACE_QUERY_SERVICE,
     cesium_ion_token=CESIUM_ION_TOKEN,
+    traffic_conflict_service=TRAFFIC_CONFLICT_SERVICE,
 )
 AUTO_DEMO_FLIGHT_PLAN_ENABLED = os.environ.get("DRONE_AUTO_DEMO_FLIGHT_PLAN", "1").strip().lower() not in {"0", "false", "no"}
 MOCK_DRONE_ENABLED = os.environ.get("DRONE_ENABLE_MOCK_TELEMETRY", "1").strip().lower() not in {"0", "false", "no"}
@@ -1227,6 +1230,45 @@ HTML = b"""<!DOCTYPE html>
   .drone3d-status.warn { border-color: rgba(210,153,34,.45); color: #ffd48a; }
   .drone3d-status.error { border-color: rgba(233,69,96,.45); color: #ffb4ab; }
   .drone3d-status.ok { border-color: rgba(63,185,80,.45); color: #a7f3b7; }
+  .drone3d-traffic-panel {
+    position: absolute; top: 18px; right: 18px; width: min(320px, calc(100% - 36px));
+    padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(88,166,255,.22);
+    background: rgba(13,17,23,.9); color: var(--text); box-shadow: 0 14px 28px rgba(0,0,0,.35);
+    display: none;
+  }
+  .drone3d-traffic-panel.visible { display: block; }
+  .drone3d-traffic-panel .panel-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px;
+  }
+  .drone3d-traffic-panel .panel-title { font-size: .9rem; font-weight: 700; color: #f0f6fc; }
+  .drone3d-traffic-panel .panel-close {
+    border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text);
+    cursor: pointer; font-size: .72rem; padding: 4px 8px;
+  }
+  .drone3d-traffic-panel .panel-close:hover { border-color: var(--accent); color: #fff; }
+  .drone3d-traffic-panel .panel-severity {
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; font-weight: 700;
+  }
+  .drone3d-traffic-panel .panel-severity.imminent { color: #ffb4ab; }
+  .drone3d-traffic-panel .panel-severity.possible { color: #ffd48a; }
+  .drone3d-traffic-panel .panel-severity.monitor { color: #f7c56e; }
+  .drone3d-traffic-panel .panel-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 10px;
+  }
+  .drone3d-traffic-panel .panel-grid span { color: var(--muted); display: block; font-size: .67rem; margin-bottom: 2px; }
+  .drone3d-traffic-panel .panel-note { color: var(--muted); font-size: .74rem; line-height: 1.45; margin-top: 10px; }
+  .traffic-alerts { display: grid; gap: 8px; margin-top: 10px; }
+  .traffic-alert {
+    border: 1px solid var(--border); border-left-width: 4px; border-radius: 10px;
+    background: rgba(13,17,23,.9); padding: 8px 10px;
+  }
+  .traffic-alert.imminent { border-left-color: #ff6b6b; background: rgba(233,69,96,.15); }
+  .traffic-alert.possible { border-left-color: #f0b429; background: rgba(240,180,41,.12); }
+  .traffic-alert .traffic-title { font-size: .72rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .traffic-alert .traffic-title.imminent { color: #ffb4ab; }
+  .traffic-alert .traffic-title.possible { color: #ffd48a; }
+  .traffic-alert .traffic-body { color: var(--text); font-size: .77rem; line-height: 1.45; margin-top: 4px; }
+  .traffic-alert .traffic-note { color: var(--muted); font-size: .72rem; line-height: 1.4; margin-top: 4px; }
   .draw-hint {
     background: rgba(233,69,96,.12); border: 1px dashed var(--accent);
     border-radius:8px; padding:10px 12px; font-size:.8rem;
@@ -1350,6 +1392,7 @@ HTML = b"""<!DOCTYPE html>
     <div class="drone3d-stage">
       <div id="drone3dCanvas"></div>
       <div class="drone3d-status" id="drone3dStatus">Select an active drone to open a 3D view around it.</div>
+      <div class="drone3d-traffic-panel" id="drone3dTrafficPanel"></div>
     </div>
   </div>
 </div>
@@ -1384,6 +1427,8 @@ let myDroneRefreshTimer = null;
 let latestMyDrones = [];
 let myDroneLayer = null;
 let myDroneMarkers = {};
+let trafficDroneLayer = null;
+let trafficDroneMarkers = {};
 let drone3dViewer = null;
 let drone3dLoadPromise = null;
 let drone3dTerrainMode = '';
@@ -1458,16 +1503,74 @@ function ensureMyDroneLayer() {
   }
 }
 
+function ensureTrafficDroneLayer() {
+  if (!trafficDroneLayer) {
+    trafficDroneLayer = L.layerGroup().addTo(map);
+  }
+}
+
+function headingArrowBadge(heading, color, accent) {
+  var resolvedHeading = Number(heading || 0);
+  var safeColor = color || '#071018';
+  var safeAccent = accent || 'rgba(255,255,255,.18)';
+  return (
+    '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:999px;background:' + safeAccent + ';margin-right:6px;flex:0 0 auto">' +
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" style="width:12px;height:12px;transform:rotate(' + resolvedHeading + 'deg)">' +
+        '<path d="M10 1 L17 17 L10 13.4 L3 17 Z" fill="' + safeColor + '" stroke="rgba(255,255,255,.82)" stroke-width="1.1" stroke-linejoin="round"/>' +
+      '</svg>' +
+    '</span>'
+  );
+}
+
 function droneMarkerIcon(drone) {
   var heading = Math.round(Number(drone.heading || 0));
   return L.divIcon({
     className: 'my-drone-marker',
     html:
-      '<div style="background:#58a6ff;color:#071018;border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:5px 9px;font-size:11px;font-weight:700;box-shadow:0 5px 14px rgba(0,0,0,.35)">' +
-      (drone.drone_id || 'DRONE') + ' | ' + heading + '&deg;' +
+      '<div style="display:inline-flex;align-items:center;background:#58a6ff;color:#071018;border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:5px 9px;font-size:11px;font-weight:700;box-shadow:0 5px 14px rgba(0,0,0,.35)">' +
+      headingArrowBadge(heading, '#071018', 'rgba(255,255,255,.28)') +
+      '<span>' + (drone.drone_id || 'DRONE') + ' | ' + heading + '&deg;</span>' +
       '</div>',
-    iconSize: [132, 28],
-    iconAnchor: [66, 14],
+    iconSize: [156, 30],
+    iconAnchor: [78, 15],
+  });
+}
+
+function trafficDroneIcon(drone) {
+  var severity = String(drone.traffic_severity || 'monitor').toLowerCase();
+  var color = severity === 'imminent' ? '#ff6b6b' : (severity === 'possible' ? '#f0b429' : '#f59e0b');
+  var label = severity === 'imminent' ? 'IMMINENT' : (severity === 'possible' ? 'POSSIBLE' : 'TRAFFIC');
+  var heading = Math.round(Number(drone.heading || 0));
+  return L.divIcon({
+    className: 'traffic-drone-marker',
+    html:
+      '<div style="display:inline-flex;align-items:center;background:' + color + ';color:#071018;border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:5px 9px;font-size:11px;font-weight:700;box-shadow:0 5px 14px rgba(0,0,0,.35)">' +
+      headingArrowBadge(heading, '#071018', 'rgba(255,255,255,.24)') +
+      '<span>' + label + ' | ' + (drone.drone_id || 'TRAFFIC') + ' | ' + heading + '&deg;</span>' +
+      '</div>',
+    iconSize: [190, 30],
+    iconAnchor: [95, 15],
+  });
+}
+
+function renderTrafficDrones(trafficDrones) {
+  ensureTrafficDroneLayer();
+  trafficDroneLayer.clearLayers();
+  trafficDroneMarkers = {};
+  (trafficDrones || []).forEach(function(drone) {
+    var marker = L.marker(
+      [Number(drone.latitude || 0), Number(drone.longitude || 0)],
+      { icon: trafficDroneIcon(drone) }
+    );
+    marker.bindPopup(
+      '<strong>' + (drone.drone_id || 'TRAFFIC') + '</strong><br/>' +
+      (drone.owner_display_name || drone.owner_email || 'External traffic') + '<br/>' +
+      'Severity ' + String(drone.traffic_severity || 'monitor').toUpperCase() + '<br/>' +
+      'H ' + Number(drone.horizontal_distance_m || 0).toFixed(0) + ' m | V ' + Number(drone.vertical_distance_m || 0).toFixed(0) + ' m<br/>' +
+      (drone.traffic_notice || '')
+    );
+    marker.addTo(trafficDroneLayer);
+    trafficDroneMarkers[drone.drone_id] = marker;
   });
 }
 
@@ -1485,6 +1588,44 @@ function drone3dStatus(message, kind) {
   var status = document.getElementById('drone3dStatus');
   status.className = 'drone3d-status' + (kind ? ' ' + kind : '');
   status.textContent = message;
+}
+
+function clearDrone3DTrafficPanel() {
+  var panel = document.getElementById('drone3dTrafficPanel');
+  panel.className = 'drone3d-traffic-panel';
+  panel.innerHTML = '';
+}
+
+function renderDrone3DTrafficPanel(meta) {
+  var panel = document.getElementById('drone3dTrafficPanel');
+  if (!meta) {
+    clearDrone3DTrafficPanel();
+    return;
+  }
+  var severity = String(meta.traffic_severity || 'monitor').toLowerCase();
+  var latestTrack = meta.track && meta.track.length ? meta.track[meta.track.length - 1] : null;
+  panel.className = 'drone3d-traffic-panel visible';
+  panel.innerHTML = '' +
+    '<div class="panel-head">' +
+      '<div>' +
+        '<div class="panel-title">' + (meta.label || meta.drone_id || 'Traffic drone') + '</div>' +
+        '<div class="panel-severity ' + severity + '">' + severity + ' traffic</div>' +
+      '</div>' +
+      '<button type="button" class="panel-close" onclick="clearDrone3DTrafficPanel()">Close</button>' +
+    '</div>' +
+    '<div class="panel-grid">' +
+      '<div><span>Drone ID</span>' + (meta.drone_id || '-') + '</div>' +
+      '<div><span>Owner</span>' + (meta.owner_display_name || meta.owner_email || 'External traffic') + '</div>' +
+      '<div><span>Flight Plan</span>' + (meta.flight_plan_public_id || '-') + '</div>' +
+      '<div><span>Location</span>' + (meta.location_name || meta.selected_twr || '-') + '</div>' +
+      '<div><span>Altitude</span>' + Number(meta.altitude || 0).toFixed(1) + ' m</div>' +
+      '<div><span>Speed</span>' + Number(meta.speed || 0).toFixed(1) + ' m/s</div>' +
+      '<div><span>Heading</span>' + Number(meta.heading || 0).toFixed(0) + '&deg;</div>' +
+      '<div><span>Closest Pass</span>' + Number(meta.horizontal_distance_m || meta.distance_m || 0).toFixed(0) + ' m / ' + Number(meta.vertical_distance_m || 0).toFixed(0) + ' m</div>' +
+      '<div><span>Position</span>' + Number(meta.latitude || 0).toFixed(5) + ', ' + Number(meta.longitude || 0).toFixed(5) + '</div>' +
+      '<div><span>Last Telemetry</span>' + ((latestTrack && latestTrack.timestamp) || meta.timestamp || '-') + '</div>' +
+    '</div>' +
+    '<div class="panel-note">' + (meta.traffic_notice || 'Live traffic telemetry snapshot.') + '</div>';
 }
 
 function setDrone3DMeta(scene) {
@@ -1563,6 +1704,7 @@ function closeDrone3D() {
     drone3dViewer.trackedEntity = undefined;
     clearDrone3DAirspaces(drone3dViewer);
   }
+  clearDrone3DTrafficPanel();
   document.getElementById('drone3dOverlay').style.display = 'none';
 }
 
@@ -1707,6 +1849,20 @@ async function ensureDrone3DViewer(scene) {
       { eventType: Cesium.CameraEventType.MIDDLE_DRAG, modifier: Cesium.KeyboardEventModifier.CTRL },
       { eventType: Cesium.CameraEventType.LEFT_DRAG, modifier: Cesium.KeyboardEventModifier.CTRL },
     ];
+    if (drone3dViewer.screenSpaceEventHandler && Cesium.ScreenSpaceEventType) {
+      drone3dViewer.screenSpaceEventHandler.setInputAction(function(click) {
+        var picked = drone3dViewer && drone3dViewer.scene && click ? drone3dViewer.scene.pick(click.position) : null;
+        var entity = picked && picked.id ? picked.id : null;
+        if (entity && entity.__trafficMeta) {
+          renderDrone3DTrafficPanel(entity.__trafficMeta);
+          if (drone3dViewer.scene && typeof drone3dViewer.scene.requestRender === 'function') {
+            drone3dViewer.scene.requestRender();
+          }
+          return;
+        }
+        clearDrone3DTrafficPanel();
+      }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+    }
     drone3dTerrainMode = requestedTerrain;
     drone3dImageryMode = requestedImagery;
   }
@@ -1796,15 +1952,20 @@ async function resolveDronePose(Cesium, viewer, drone, scene) {
   return pose;
 }
 
-function renderDroneHeadingIndicator(Cesium, viewer, drone, pose) {
-  var entity = viewer.entities.getById('focus-drone-heading');
-  var tipEntity = viewer.entities.getById('focus-drone-heading-tip');
+function renderDroneHeadingIndicator(Cesium, viewer, drone, pose, options) {
+  options = options || {};
+  var idPrefix = String(options.idPrefix || 'focus-drone');
+  var entity = viewer.entities.getById(idPrefix + '-heading');
+  var tipEntity = viewer.entities.getById(idPrefix + '-heading-tip');
   if (!pose || !pose.position) {
     if (entity) viewer.entities.remove(entity);
     if (tipEntity) viewer.entities.remove(tipEntity);
     return;
   }
-  var arrowLength = Math.max(Number(drone.speed || 0) * 10.0, 120.0);
+  var arrowLength = Math.max(
+    Number(drone.speed || 0) * Number(options.speedMultiplier || 10.0),
+    Number(options.minLength || 120.0)
+  );
   var target = offsetPoint(
     Number(drone.latitude || 0),
     Number(drone.longitude || 0),
@@ -1824,37 +1985,37 @@ function renderDroneHeadingIndicator(Cesium, viewer, drone, pose) {
       pose.position,
       targetPosition,
     ],
-    width: 8,
+    width: Number(options.width || 8),
     material: new Cesium.PolylineArrowMaterialProperty(
-      Cesium.Color.fromCssColorString('#8cd6ff').withAlpha(0.96)
+      Cesium.Color.fromCssColorString(options.color || '#8cd6ff').withAlpha(Number(options.alpha || 0.96))
     ),
-    depthFailMaterial: Cesium.Color.fromCssColorString('#dff8ff').withAlpha(0.96),
+    depthFailMaterial: Cesium.Color.fromCssColorString(options.depthFailColor || '#dff8ff').withAlpha(Number(options.alpha || 0.96)),
   };
   if (entity) {
     entity.polyline = arrow;
   } else {
     viewer.entities.add({
-      id: 'focus-drone-heading',
+      id: idPrefix + '-heading',
       polyline: arrow,
     });
   }
   var tipState = {
     position: targetPosition,
     billboard: {
-      image: droneHeadingTipImage(),
-      width: 24,
-      height: 24,
+      image: options.tipImage || droneHeadingTipImage(),
+      width: Number(options.tipWidth || 24),
+      height: Number(options.tipHeight || 24),
       rotation: Cesium.Math.toRadians(Number(drone.heading || 0)),
       disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      scaleByDistance: new Cesium.NearFarScalar(250, 1.0, 24000, 0.78),
-      eyeOffset: new Cesium.Cartesian3(0, 0, 120),
+      scaleByDistance: new Cesium.NearFarScalar(250, Number(options.nearScale || 1.0), 24000, Number(options.farScale || 0.78)),
+      eyeOffset: new Cesium.Cartesian3(0, 0, Number(options.eyeOffsetZ || 120)),
     },
   };
   if (tipEntity) {
     tipEntity.position = tipState.position;
     tipEntity.billboard = tipState.billboard;
   } else {
-    viewer.entities.add(Object.assign({ id: 'focus-drone-heading-tip' }, tipState));
+    viewer.entities.add(Object.assign({ id: idPrefix + '-heading-tip' }, tipState));
   }
   if (viewer.scene && typeof viewer.scene.requestRender === 'function') {
     viewer.scene.requestRender();
@@ -2006,28 +2167,56 @@ async function renderDroneEntity(Cesium, viewer, drone, scene) {
   return viewer.entities.add(Object.assign({ id: 'focus-drone' }, entityState));
 }
 
-function renderNearbyAircraft(Cesium, viewer, aircraft) {
+async function renderNearbyAircraft(Cesium, viewer, aircraft, scene) {
   removeDrone3DEntities(viewer, ['nearby-aircraft:']);
-  (aircraft || []).forEach(function(drone) {
-    viewer.entities.add({
+  for (const drone of (aircraft || [])) {
+    var severity = String(drone.traffic_severity || 'clear').toLowerCase();
+    var color = severity === 'imminent'
+      ? Cesium.Color.fromCssColorString('#ff6b6b')
+      : (severity === 'possible'
+        ? Cesium.Color.fromCssColorString('#f0b429')
+        : Cesium.Color.ORANGE);
+    var pose = await resolveDronePose(Cesium, viewer, drone, scene);
+    var entity = viewer.entities.add({
       id: 'nearby-aircraft:' + String(drone.drone_id || 'unknown'),
-      position: Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), Number(drone.altitude || 0)),
+      position: pose && pose.position
+        ? pose.position
+        : Cesium.Cartesian3.fromDegrees(Number(drone.longitude), Number(drone.latitude), Math.max(Number(drone.altitude || 0), 45)),
       point: {
-        pixelSize: 10,
-        color: Cesium.Color.ORANGE,
+        pixelSize: 11,
+        color: color,
         outlineColor: Cesium.Color.WHITE,
-        outlineWidth: 1,
+        outlineWidth: 2,
+        heightReference: pose ? pose.heightReference : undefined,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       },
       label: {
-        text: String(drone.drone_id || 'ACFT'),
+        text: String(drone.drone_id || 'ACFT') + (severity !== 'clear' ? ' | ' + severity.toUpperCase() : ''),
         font: '12px sans-serif',
-        fillColor: Cesium.Color.ORANGE,
+        fillColor: color,
         showBackground: true,
         backgroundColor: Cesium.Color.BLACK.withAlpha(0.55),
         pixelOffset: new Cesium.Cartesian2(0, -20),
+        heightReference: pose ? pose.heightReference : undefined,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        eyeOffset: new Cesium.Cartesian3(0, 0, 120),
       },
     });
-  });
+    entity.__trafficMeta = drone;
+    renderDroneHeadingIndicator(Cesium, viewer, drone, pose, {
+      idPrefix: 'nearby-aircraft:' + String(drone.drone_id || 'unknown'),
+      color: severity === 'imminent' ? '#ff9b9b' : (severity === 'possible' ? '#ffd070' : '#f7b955'),
+      depthFailColor: '#fff1d6',
+      width: 5,
+      minLength: 85,
+      speedMultiplier: 8.0,
+      tipWidth: 18,
+      tipHeight: 18,
+      nearScale: 0.92,
+      farScale: 0.72,
+      eyeOffsetZ: 105,
+    });
+  }
 }
 
 function renderObstacles(Cesium, viewer, obstacles) {
@@ -2281,10 +2470,10 @@ async function renderDrone3DScene(scene, options) {
   var droneEntity = await renderDroneEntity(Cesium, viewer, scene.drone || {}, scene);
   renderOperationalRegion(Cesium, viewer, scene, scene.drone || {});
   renderObstacles(Cesium, viewer, scene.obstacles || []);
-  renderNearbyAircraft(Cesium, viewer, scene.nearby_aircraft || []);
   renderDroneTrack(Cesium, viewer, (scene.drone && scene.drone.track) || []);
   var buildingsLoaded = await ensureDrone3DBuildings(Cesium, viewer, scene);
   droneEntity = await renderDroneEntity(Cesium, viewer, scene.drone || {}, scene);
+  await renderNearbyAircraft(Cesium, viewer, scene.nearby_aircraft || [], scene);
   renderDroneTrack(Cesium, viewer, (scene.drone && scene.drone.track) || []);
   syncDrone3DAirspaces(Cesium, viewer, scene, true);
   viewer.trackedEntity = undefined;
@@ -2328,7 +2517,12 @@ async function loadDrone3DScene(droneId, options) {
     document.getElementById('drone3dSubtitle').textContent =
       radiusKm + ' km terrain-following map around ' + (scene.drone && scene.drone.drone_id ? scene.drone.drone_id : droneId) + '. Terrain, buildings, and nearby airspace volumes refresh while the drone is live.';
     var rendered = await renderDrone3DScene(scene, options || {});
-    if (rendered.terrainMode === 'ion' && buildingProvider === 'google_photorealistic_3d_tiles' && rendered.buildingsLoaded) {
+    var topTrafficAlert = scene.traffic_alerts && scene.traffic_alerts.length ? scene.traffic_alerts[0] : null;
+    if (topTrafficAlert && String(topTrafficAlert.severity || '').toLowerCase() === 'imminent') {
+      drone3dStatus(topTrafficAlert.notice + ' ' + (topTrafficAlert.suggestion || ''), 'error');
+    } else if (topTrafficAlert && String(topTrafficAlert.severity || '').toLowerCase() === 'possible') {
+      drone3dStatus(topTrafficAlert.notice + ' ' + (topTrafficAlert.suggestion || ''), 'warn');
+    } else if (rendered.terrainMode === 'ion' && buildingProvider === 'google_photorealistic_3d_tiles' && rendered.buildingsLoaded) {
       drone3dStatus('Live 3D map loaded with Cesium terrain, Google Photorealistic 3D Tiles, and nearby airspace volumes.', 'ok');
     } else if (rendered.terrainMode === 'ion' && rendered.buildingsLoaded) {
       drone3dStatus('Live 3D map loaded with terrain, OSM buildings, and nearby airspace volumes around the drone.', 'ok');
@@ -2367,11 +2561,13 @@ async function openDrone3D(droneId) {
   }
 }
 
-function renderMyDrones(drones) {
+function renderMyDrones(drones, trafficDrones) {
   latestMyDrones = drones || [];
   ensureMyDroneLayer();
+  ensureTrafficDroneLayer();
   myDroneLayer.clearLayers();
   myDroneMarkers = {};
+  renderTrafficDrones(trafficDrones || []);
 
   if (!authenticatedUser) {
     setMyDronesContent('<div class="muted">Sign in to load your live drone telemetry.</div>');
@@ -2397,6 +2593,17 @@ function renderMyDrones(drones) {
 
   var html = drones.map(function(drone) {
     var statusClass = String(drone.status || 'offline').toLowerCase();
+    var alerts = (drone.traffic_alerts || []).slice(0, 2);
+    var alertsHtml = alerts.map(function(alert) {
+      var severity = String(alert.severity || 'possible').toLowerCase();
+      return (
+        '<div class="traffic-alert ' + severity + '">' +
+          '<div class="traffic-title ' + severity + '">' + severity + ' traffic alert</div>' +
+          '<div class="traffic-body">' + (alert.notice || '') + '</div>' +
+          '<div class="traffic-note">' + (alert.suggestion || '') + '</div>' +
+        '</div>'
+      );
+    }).join('');
     return (
       '<div class="drone-card">' +
         '<div class="drone-top">' +
@@ -2413,6 +2620,7 @@ function renderMyDrones(drones) {
           '<div><span>Pitch / Roll</span>' + Number(drone.pitch || 0).toFixed(1) + '&deg; / ' + Number(drone.roll || 0).toFixed(1) + '&deg;</div>' +
           '<div><span>Position</span>' + Number(drone.latitude || 0).toFixed(5) + ', ' + Number(drone.longitude || 0).toFixed(5) + '</div>' +
         '</div>' +
+        (alertsHtml ? '<div class="traffic-alerts">' + alertsHtml + '</div>' : '') +
         '<div class="drone-actions">' +
           '<button type="button" onclick="focusDrone(\\'' + (drone.drone_id || '') + '\\')">Show on map</button>' +
           '<button type="button" onclick="openDrone3D(\\'' + (drone.drone_id || '') + '\\')">3D view</button>' +
@@ -2447,7 +2655,7 @@ async function loadMyFlightPlans(showErrors) {
 
 async function loadMyDrones(showErrors) {
   if (!authenticatedUser) {
-    renderMyDrones([]);
+    renderMyDrones([], []);
     return;
   }
   try {
@@ -2457,7 +2665,7 @@ async function loadMyDrones(showErrors) {
       throw new Error(err.error || 'Failed to load live drone telemetry.');
     }
     const data = await res.json();
-    renderMyDrones(data.drones || []);
+    renderMyDrones(data.drones || [], data.traffic_drones || []);
   } catch (err) {
     if (showErrors) {
       alert(err && err.message ? err.message : 'Failed to load live drone telemetry.');
@@ -2481,6 +2689,9 @@ function stopMyDroneRefresh() {
   latestMyDrones = [];
   if (myDroneLayer) {
     myDroneLayer.clearLayers();
+  }
+  if (trafficDroneLayer) {
+    trafficDroneLayer.clearLayers();
   }
 }
 
@@ -4406,6 +4617,75 @@ def _list_live_drones_for_admin() -> list[dict]:
     )
 
 
+def _traffic_severity_rank(severity: str) -> int:
+    return {
+        "clear": 0,
+        "monitor": 1,
+        "possible": 2,
+        "imminent": 3,
+    }.get(str(severity or "").lower(), 0)
+
+
+def _build_live_drone_workspace(owner_email: str) -> dict:
+    my_drones = _list_live_drones_for_user(owner_email)
+    all_live = _list_live_drones_for_admin()
+    normalized_owner = owner_email.strip().lower()
+    traffic_index: dict[str, dict] = {}
+    enriched_drones: list[dict] = []
+
+    for drone in my_drones:
+        other_drones = [
+            candidate
+            for candidate in all_live
+            if str(candidate.get("drone_id") or "") != str(drone.get("drone_id") or "")
+            and str(candidate.get("owner_email") or "").strip().lower() != normalized_owner
+        ]
+        assessment = TRAFFIC_CONFLICT_SERVICE.evaluate_conflicts(
+            focus_drone=drone,
+            other_drones=other_drones,
+        )
+        enriched_drones.append(
+            {
+                **drone,
+                "traffic_status": assessment.get("top_severity", "clear"),
+                "traffic_alerts": assessment.get("alerts", []),
+            }
+        )
+        for intruder in assessment.get("traffic", []):
+            intruder_id = str(intruder.get("drone_id") or "")
+            if not intruder_id:
+                continue
+            existing = traffic_index.get(intruder_id)
+            if (
+                existing is None
+                or _traffic_severity_rank(str(intruder.get("traffic_severity") or "")) > _traffic_severity_rank(str(existing.get("traffic_severity") or ""))
+                or (
+                    _traffic_severity_rank(str(intruder.get("traffic_severity") or "")) == _traffic_severity_rank(str(existing.get("traffic_severity") or ""))
+                    and float(intruder.get("horizontal_distance_m") or 0.0) < float(existing.get("horizontal_distance_m") or 0.0)
+                )
+            ):
+                traffic_index[intruder_id] = intruder
+
+    traffic_drones = sorted(
+        traffic_index.values(),
+        key=lambda item: (
+            -_traffic_severity_rank(str(item.get("traffic_severity") or "")),
+            float(item.get("horizontal_distance_m") or 0.0),
+            str(item.get("drone_id") or ""),
+        ),
+    )
+    enriched_drones.sort(
+        key=lambda item: (
+            -_traffic_severity_rank(str(item.get("traffic_status") or "")),
+            str(item.get("drone_id") or ""),
+        )
+    )
+    return {
+        "drones": enriched_drones,
+        "traffic_drones": traffic_drones,
+    }
+
+
 def _build_drone_3d_scene(drone_id: str, *, owner_email: str | None, admin_view: bool = False) -> dict:
     return DRONE_3D_SCENE_SERVICE.build_scene(
         drone_id,
@@ -4437,6 +4717,42 @@ _DEMO_FLIGHT_BLUEPRINTS = (
             [26.1025, 44.5535],
             [26.0415, 44.5260],
         ],
+    },
+)
+
+_TRAFFIC_DEMO_OWNER = {
+    "email": "traffic-demo@romatsa.local",
+    "display_name": "ROMATSA Traffic Demo",
+    "google_user_id": "traffic-demo-bot",
+    "app": "visualise_zones_web",
+}
+
+_TRAFFIC_DEMO_BLUEPRINTS = (
+    {
+        "location_name": "BUCHAREST Conflict Traffic",
+        "purpose": "Automatic external traffic for imminent collision testing",
+        "selected_twr": "LRBS",
+        "area_kind": "polygon",
+        "polygon_points": [
+            [26.0495, 44.4820],
+            [26.1290, 44.4835],
+            [26.1485, 44.5220],
+            [26.1025, 44.5535],
+            [26.0415, 44.5260],
+        ],
+        "drone_id": "TRAFFIC-LRBS-01",
+        "drone_label": "Traffic Alpha",
+    },
+    {
+        "location_name": "PETROSANI Conflict Traffic",
+        "purpose": "Automatic external traffic for possible conflict testing",
+        "selected_twr": "LRAR",
+        "area_kind": "circle",
+        "center_lon": 24.02925,
+        "center_lat": 45.44475,
+        "radius_m": 180,
+        "drone_id": "TRAFFIC-LRAR-01",
+        "drone_label": "Traffic Bravo",
     },
 )
 
@@ -4531,10 +4847,73 @@ def _bootstrap_demo_flight_plan(owner: dict) -> dict:
                 }
             )
 
+    traffic_result = _bootstrap_external_traffic_demo()
+
     return {
         "created": bool(created_plans),
         "reason": "created" if created_plans else ("failed" if errors else "existing-demo-plans"),
         "flight_plans": created_plans,
+        "errors": errors,
+        "traffic_demo": traffic_result,
+    }
+
+
+def _bootstrap_external_traffic_demo() -> dict:
+    active_plans = _list_flight_plans_response(
+        owner_email=_TRAFFIC_DEMO_OWNER["email"],
+        include_past=False,
+        include_cancelled=False,
+    )
+    plans_by_location = {
+        str(plan.get("location_name") or "").strip().lower(): plan
+        for plan in active_plans
+        if (plan.get("runtime_state") or "").lower() in {"ongoing", "upcoming"}
+    }
+
+    now_local = datetime.now(ZoneInfo("Europe/Bucharest"))
+    start_local = now_local.replace(second=0, microsecond=0) - timedelta(minutes=5)
+    end_local = start_local + timedelta(minutes=60)
+    created: list[dict] = []
+    errors: list[dict[str, str]] = []
+
+    for blueprint in _TRAFFIC_DEMO_BLUEPRINTS:
+        location_key = blueprint["location_name"].strip().lower()
+        plan = plans_by_location.get(location_key)
+        if plan is None:
+            try:
+                plan = _create_flight_plan_from_payload(
+                    _build_demo_payload(
+                        _TRAFFIC_DEMO_OWNER,
+                        owner_name=_TRAFFIC_DEMO_OWNER["display_name"],
+                        start_local=start_local,
+                        end_local=end_local,
+                        blueprint=blueprint,
+                    ),
+                    _TRAFFIC_DEMO_OWNER,
+                )
+                created.append(plan)
+                plans_by_location[location_key] = plan
+            except Exception as exc:
+                errors.append({"location_name": blueprint["location_name"], "error": str(exc)})
+                continue
+
+        try:
+            DRONE_TRACKING_REPO.upsert_drone_device(
+                drone_id=blueprint["drone_id"],
+                owner_user_id=plan.get("owner_user_id"),
+                owner_email=_TRAFFIC_DEMO_OWNER["email"],
+                owner_display_name=_TRAFFIC_DEMO_OWNER["display_name"],
+                flight_plan_public_id=plan["public_id"],
+                label=blueprint["drone_label"],
+                is_mock=True,
+            )
+        except Exception as exc:
+            errors.append({"location_name": blueprint["location_name"], "error": str(exc)})
+
+    return {
+        "created": bool(created),
+        "reason": "created" if created else ("failed" if errors else "existing-traffic-demo-plans"),
+        "flight_plans": created,
         "errors": errors,
     }
 
@@ -4634,7 +5013,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(
                     200,
                     "application/json; charset=utf-8",
-                    _json_bytes({"drones": _list_live_drones_for_user(user["email"])}),
+                    _json_bytes(_build_live_drone_workspace(user["email"])),
                 )
             except PermissionError as exc:
                 self._send(401, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
