@@ -5160,7 +5160,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/admin", "/admin/logged-accounts", "/admin/flight-plans"):
             try:
                 _require_admin_user(self.headers)
-                self._send(200, "text/html; charset=utf-8", ADMIN_DASHBOARD_HTML.encode("utf-8"))
+                page = ADMIN_DASHBOARD_HTML
+                if path == "/admin/logged-accounts":
+                    page = ADMIN_HTML
+                elif path == "/admin/flight-plans":
+                    page = FLIGHT_PLAN_ADMIN_HTML
+                self._send(200, "text/html; charset=utf-8", page.encode("utf-8"))
             except PermissionError as exc:
                 self._send(403, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
 

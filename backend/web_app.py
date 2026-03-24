@@ -215,6 +215,10 @@ async def favicon() -> Response:
 async def admin_page(request: Request) -> Response:
     try:
         vz._require_admin_user(request.headers)
+        if request.url.path == "/admin/logged-accounts":
+            return _html_response(vz.ADMIN_HTML)
+        if request.url.path == "/admin/flight-plans":
+            return _html_response(vz.FLIGHT_PLAN_ADMIN_HTML)
         return _html_response(vz.ADMIN_DASHBOARD_HTML)
     except PermissionError as exc:
         return _json_response({"error": str(exc)}, status_code=403)
