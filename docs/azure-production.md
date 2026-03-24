@@ -5,7 +5,8 @@
 2. Set production app settings and secrets in Azure before the first public start.
 3. Mount persistent storage at `/app/.data`.
 4. Validate Google OAuth against the real public origin.
-5. Enable monitoring, backups, and rollback using image tags and persistent data snapshots.
+5. On Azure Database for PostgreSQL Flexible Server, allowlist and create `postgis` in the app database before enabling public traffic.
+6. Enable monitoring, backups, and rollback using image tags and persistent data snapshots.
 
 ## Required Azure App Settings
 - `DRONE_ENV=production`
@@ -23,6 +24,16 @@
 - `PGPASSWORD=<postgres-password>`
 - `DRONE_DB_NAME=drone_app`
 - `WEB_CONCURRENCY=2`
+
+## Azure PostgreSQL Requirements
+- This app's airspace module requires PostGIS.
+- On Azure Database for PostgreSQL Flexible Server, allowlist `postgis` in the server parameter `azure.extensions`.
+- Then connect to the target database and run:
+  - `CREATE EXTENSION IF NOT EXISTS postgis;`
+- Verify:
+  - `SELECT extname FROM pg_extension WHERE extname='postgis';`
+  - `SELECT to_regclass('public.airspace_zones');`
+  - `SELECT to_regclass('public.airspace_zones_active');`
 
 ## Google OAuth Changes
 For the current web login flow, you need to update Google OAuth with Authorized JavaScript origins for every real frontend origin that will serve the app.

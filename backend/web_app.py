@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 
+from backend.airspace.repositories.db import get_connection
 from scripts import visualise_zones as vz
 
 
@@ -53,6 +54,33 @@ def _production_config_errors() -> list[str]:
         errors.append("DRONE_SESSION_SECRET is required")
     if not (os.environ.get("DRONE_GOOGLE_WEB_CLIENT_ID") or "").strip():
         errors.append("DRONE_GOOGLE_WEB_CLIENT_ID is required")
+    errors.extend(_airspace_readiness_errors())
+    return errors
+
+
+def _airspace_readiness_errors() -> list[str]:
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'postgis'")
+            if cur.fetchone() is None:
+                return ["PostGIS extension is not installed in the application database"]
+
+            cur.execute(
+                """
+                SELECT
+                    to_regclass('public.airspace_zones')::text AS airspace_zones,
+                    to_regclass('public.airspace_zones_active')::text AS airspace_zones_active
+                """
+            )
+            row = cur.fetchone() or {}
+    except Exception as exc:
+        return [f"Airspace database readiness check failed: {exc}"]
+
+    errors: list[str] = []
+    if not row.get("airspace_zones"):
+        errors.append("Required relation public.airspace_zones is missing")
+    if not row.get("airspace_zones_active"):
+        errors.append("Required relation public.airspace_zones_active is missing")
     return errors
 
 
@@ -109,6 +137,8 @@ async def _lifespan(_: FastAPI):
         admin_emails=sorted(vz.ADMIN_EMAILS),
         mock_drone_enabled=vz.MOCK_DRONE_ENABLED,
         auto_demo_enabled=vz.AUTO_DEMO_FLIGHT_PLAN_ENABLED,
+        cesium_ion_configured=bool(vz.CESIUM_ION_TOKEN),
+        cesium_ion_token_source=vz.CESIUM_ION_TOKEN_SOURCE,
         config_errors=config_errors,
     )
     if vz.MOCK_DRONE_ENABLED:

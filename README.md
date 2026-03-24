@@ -15,6 +15,10 @@
 3. `scripts/init-db.sh`
 4. `flutter --version`
 
+Optional Cesium 3D token for Bash/Linux runs:
+- `scripts/set-cesium-ion-token.sh <your-token>`
+- `source scripts/dev-env.sh` auto-loads `.data/secrets/drone-cesium-ion-token` when present.
+
 ## Windows Quick Start
 1. Open a new PowerShell window after installing Docker Desktop, Git, and Node.js so the updated `PATH` is picked up.
 2. Store the Cesium ion token once for the current Windows user:
@@ -106,6 +110,8 @@ Start server:
   - `GET /api/drones/<drone_id>/scene-3d`
 - Optional terrain relief token:
   - env var `DRONE_CESIUM_ION_TOKEN`
+- Bash/Linux local secret helper:
+  - `scripts/set-cesium-ion-token.sh <your-token>`
 - Windows local secret helper:
   - `.\scripts\set-cesium-ion-token.ps1 -Token <your-token>`
 - If `DRONE_CESIUM_ION_TOKEN` is not set, 3D still opens with imagery and airspace, but Cesium terrain and photorealistic 3D tiles stay disabled.
@@ -133,9 +139,14 @@ Start server:
 
 ### Run with Docker Compose
 1. Set `DRONE_GOOGLE_WEB_CLIENT_ID`
-2. Run `docker compose up --build`
+2. Optional for automatic Cesium 3D terrain on Bash/Linux: `scripts/set-cesium-ion-token.sh <your-token>`
+3. Run `docker compose up --build`
    On Windows, if `docker` is not recognized in your current shell, use `.\scripts\docker-compose.ps1 up --build` or open a fresh PowerShell window after Docker Desktop installation.
-3. Open `http://localhost:5174/`
+4. Open `http://localhost:5174/`
+
+Notes:
+- Plain `docker compose up` now reads `.data/secrets/drone-cesium-ion-token` through a read-only mount at `/run/drone-secrets`.
+- If you already use the PowerShell helper, it still works and continues to inject `DRONE_CESIUM_ION_TOKEN` directly.
 
 ## Airspace Backend
 - FastAPI app: `uvicorn backend.app:app --host 0.0.0.0 --port 8080`

@@ -57,6 +57,7 @@ from modules.auth.module import build_auth_module
 from backend.airspace.ingestion.pipeline import SOURCES as AIRSPACE_INGESTION_SOURCES
 from backend.airspace.repositories.admin_repository import AirspaceAdminRepository
 from backend.airspace.services.admin_overview_service import AirspaceAdminOverviewService
+from backend.cesium import resolve_cesium_ion_token
 from backend.drone_tracking.repositories.drone_tracking_repository import DroneTrackingRepository
 from backend.drone_tracking.services.mock_telemetry_service import DroneMockTelemetryService
 from backend.drone_tracking.services.scene_3d_service import Drone3DSceneService
@@ -160,7 +161,7 @@ GOOGLE_WEB_CLIENT_ID = os.environ.get(
     "DRONE_GOOGLE_WEB_CLIENT_ID",
     "1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com",
 )
-CESIUM_ION_TOKEN = os.environ.get("DRONE_CESIUM_ION_TOKEN", "").strip()
+CESIUM_ION_TOKEN, CESIUM_ION_TOKEN_SOURCE = resolve_cesium_ion_token(root_dir=ROOT_DIR)
 AIRSPACE_QUERY_SERVICE = build_airspace_query_service()
 AIRSPACE_ADMIN_REPO = AirspaceAdminRepository()
 AIRSPACE_ADMIN_OVERVIEW_SERVICE = AirspaceAdminOverviewService(

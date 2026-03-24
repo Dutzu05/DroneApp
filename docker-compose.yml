@@ -51,12 +51,14 @@ services:
       DRONE_COOKIE_SECURE: ${DRONE_COOKIE_SECURE:-0}
       DRONE_COOKIE_DOMAIN: ${DRONE_COOKIE_DOMAIN:-}
       DRONE_CESIUM_ION_TOKEN: ${DRONE_CESIUM_ION_TOKEN:-}
+      DRONE_CESIUM_ION_TOKEN_FILE: ${DRONE_CESIUM_ION_TOKEN_FILE:-/run/drone-secrets/drone-cesium-ion-token}
       DRONE_GOOGLE_WEB_CLIENT_ID: ${DRONE_GOOGLE_WEB_CLIENT_ID:-1082596673448-0k7mnlrj1vt9pkrs1vuh8ar68arsj6mt.apps.googleusercontent.com}
       DRONE_ANEXA1_TEMPLATE_PATH: /app/assets/templates/ANEXA1.pdf
       DRONE_RUN_MIGRATIONS: 0
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
     volumes:
       - app_data:/app/.data
+      - ./.data/secrets:/run/drone-secrets:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5174/readyz"]
       interval: 15s

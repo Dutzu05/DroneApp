@@ -27,16 +27,17 @@ resolve_pg_bin() {
 
 PSQL_BIN="${PSQL_BIN:-$(resolve_pg_bin psql)}"
 CREATEDB_BIN="${CREATEDB_BIN:-$(resolve_pg_bin createdb)}"
+PSQL_ARGS=(-v ON_ERROR_STOP=1)
 
-if ! "$PSQL_BIN" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+if ! "$PSQL_BIN" "${PSQL_ARGS[@]}" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
   "$CREATEDB_BIN" "$DB_NAME"
 fi
 
-"$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/restriction_zones_schema.sql"
-"$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/flight_plans_schema.sql"
-"$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/drone_tracking_schema.sql"
-if "$PSQL_BIN" -d "$DB_NAME" -tAc "SELECT 1 FROM pg_available_extensions WHERE name='postgis'" | grep -q 1; then
-  "$PSQL_BIN" -d "$DB_NAME" -f "$ROOT_DIR/sql/airspace_schema.sql"
+"$PSQL_BIN" "${PSQL_ARGS[@]}" -d "$DB_NAME" -f "$ROOT_DIR/sql/restriction_zones_schema.sql"
+"$PSQL_BIN" "${PSQL_ARGS[@]}" -d "$DB_NAME" -f "$ROOT_DIR/sql/flight_plans_schema.sql"
+"$PSQL_BIN" "${PSQL_ARGS[@]}" -d "$DB_NAME" -f "$ROOT_DIR/sql/drone_tracking_schema.sql"
+if "$PSQL_BIN" "${PSQL_ARGS[@]}" -d "$DB_NAME" -tAc "SELECT 1 FROM pg_available_extensions WHERE name='postgis'" | grep -q 1; then
+  "$PSQL_BIN" "${PSQL_ARGS[@]}" -d "$DB_NAME" -f "$ROOT_DIR/sql/airspace_schema.sql"
 else
   echo "PostGIS extension not available in this database; skipping sql/airspace_schema.sql" >&2
 fi
