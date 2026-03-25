@@ -327,18 +327,29 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
       return `<span class=\"badge ${klass}\">${label}</span>`;
     }
 
-    async function approveFlightPlan(publicId) {
-      const res = await fetch('/api/admin/flight-plans/' + encodeURIComponent(publicId) + '/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approver_email: 'admin@local' }),
-      });
-      const data = await res.json().catch(function() { return {}; });
-      if (!res.ok) {
-        alert(data.error || 'Failed to grant permission.');
-        return;
+    async function approveFlightPlan(publicId, buttonEl) {
+      if (!publicId) return;
+      const originalText = buttonEl ? buttonEl.textContent : '';
+      if (buttonEl) {
+        buttonEl.disabled = true;
+        buttonEl.textContent = 'Granting...';
       }
-      loadRows();
+      try {
+        const res = await fetch('/api/admin/flight-plans/' + encodeURIComponent(publicId) + '/approve', {
+          method: 'POST',
+        });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to grant permission.');
+        }
+        await loadRows();
+      } catch (err) {
+        if (buttonEl) {
+          buttonEl.disabled = false;
+          buttonEl.textContent = originalText || 'Grant permission';
+        }
+        alert(err && err.message ? err.message : 'Failed to grant permission.');
+      }
     }
 
     async function loadRows() {
@@ -367,7 +378,7 @@ FLIGHT_PLAN_ADMIN_HTML = """<!DOCTYPE html>
           ? `<a href=\"/api/flight-plans/${plan.public_id}/pdf\" target=\"_blank\">Download PDF</a>`
           : '-';
         const actionHtml = approvalState === 'pending'
-          ? `<button type=\"button\" onclick=\"approveFlightPlan('${plan.public_id || ''}')\">Grant permission</button>`
+          ? `<button type=\"button\" onclick=\"approveFlightPlan('${plan.public_id || ''}', this)\">Grant permission</button>`
           : '<span class=\"muted\">-</span>';
 
         tr.innerHTML = `
@@ -446,6 +457,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     .panel-grid { display: grid; grid-template-columns: 1.1fr 1.3fr 1.1fr; gap: 14px; align-items: start; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; min-height: 280px; }
     .panel .head { padding: 14px 16px; background: var(--panel-alt); border-bottom: 1px solid var(--line); }
+    .panel .head.split { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
     .panel .head h2 { margin: 0 0 4px 0; font-size: 18px; }
     .panel .body { padding: 0; }
     .table-wrap { overflow: auto; max-height: 540px; }
@@ -463,6 +475,29 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     .bottom-grid { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 14px; margin-top: 14px; }
     .mono { font-family: monospace; word-break: break-all; }
     a { color: var(--accent); }
+    .button-link, .action-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(88, 166, 255, .08);
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .action-button {
+      background: rgba(35, 134, 54, .18);
+      border-color: rgba(35, 134, 54, .45);
+      color: #9ae6ab;
+    }
+    .action-button[disabled] { opacity: .55; cursor: not-allowed; }
+    .action-stack { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .actions-cell { white-space: nowrap; }
     .drone-map { height: 260px; border-top: 1px solid var(--line); }
     .drone-table { max-height: 280px; overflow: auto; border-top: 1px solid var(--line); }
     @media (max-width: 1280px) {
@@ -536,9 +571,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       </section>
 
       <section class=\"panel\">
-        <div class=\"head\">
-          <h2>Flight Plans</h2>
-          <div class=\"muted\" id=\"plansCaption\"></div>
+        <div class=\"head split\">
+          <div>
+            <h2>Flight Plans</h2>
+            <div class=\"muted\" id=\"plansCaption\"></div>
+          </div>
+          <a class=\"button-link\" href=\"/admin/flight-plans\">Open Flight Plan Queue</a>
         </div>
         <div class=\"body table-wrap\">
           <table>
@@ -548,6 +586,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                 <th>Owner</th>
                 <th>Schedule</th>
                 <th>Risk</th>
+                <th>Approval</th>
+                <th>PDF</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody id=\"plansRows\"></tbody>
@@ -711,22 +752,32 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         const state = String(plan.runtime_state || '').toLowerCase();
         return state === 'ongoing' || state === 'upcoming';
       }).length;
+      const pendingCount = plans.filter(function(plan) {
+        return String(plan.approval_status || '').toLowerCase() === 'pending';
+      }).length;
       document.getElementById('summaryPlansSub').textContent =
-        `${activeCount} active or upcoming`;
+        `${activeCount} active or upcoming | ${pendingCount} pending approval`;
       document.getElementById('plansCaption').textContent =
-        `${plans.length} stored flight plan${plans.length === 1 ? '' : 's'}`;
+        `${plans.length} stored flight plan${plans.length === 1 ? '' : 's'} | ${pendingCount} pending approval`;
       const rows = document.getElementById('plansRows');
       if (!plans.length) {
-        renderEmpty(rows, 4, 'No flight plans stored yet.');
+        renderEmpty(rows, 7, 'No flight plans stored yet.');
         return;
       }
       rows.innerHTML = plans.map(function(plan) {
         const runtimeState = String(plan.runtime_state || 'upcoming').toLowerCase();
         const workflowState = String(plan.workflow_status || 'planned').toLowerCase();
         const riskLevel = String(plan.risk_level || 'LOW');
+        const approvalState = String(plan.approval_status || 'not_required').toLowerCase();
+        const approvalDetail = approvalState === 'pending'
+          ? 'Awaiting admin review'
+          : formatValue(plan.approved_by_email);
         const pdfLink = plan.public_id
-          ? `<a href=\"/api/flight-plans/${plan.public_id}\" target=\"_blank\"></a>`
-          : '';
+          ? `<a href=\"/api/flight-plans/${plan.public_id}/pdf\" target=\"_blank\" rel=\"noopener noreferrer\">Download PDF</a>`
+          : '<span class=\"muted\">-</span>';
+        const actionHtml = approvalState === 'pending'
+          ? `<div class=\"action-stack\"><button class=\"action-button\" type=\"button\" onclick=\"approveDashboardFlightPlan('${plan.public_id || ''}', this)\">Grant permission</button><a class=\"button-link\" href=\"/admin/flight-plans\">Review queue</a></div>`
+          : '<a class=\"button-link\" href=\"/admin/flight-plans\">Review queue</a>';
         return `
           <tr>
             <td class=\"stack\">
@@ -744,12 +795,42 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             </td>
             <td class=\"stack\">
               <span>${statusBadge(riskLevel)}</span>
-              <span class=\"small\">${statusBadge(plan.approval_status || 'not_required')}</span>
               <span class=\"small\">${formatValue(plan.risk_summary)}</span>
             </td>
+            <td class=\"stack\">
+              <span>${statusBadge(plan.approval_status || 'not_required')}</span>
+              <span class=\"small\">${approvalDetail}</span>
+            </td>
+            <td>${pdfLink}</td>
+            <td class=\"actions-cell\">${actionHtml}</td>
           </tr>
         `;
       }).join('');
+    }
+
+    async function approveDashboardFlightPlan(publicId, buttonEl) {
+      if (!publicId) return;
+      const originalText = buttonEl ? buttonEl.textContent : '';
+      if (buttonEl) {
+        buttonEl.disabled = true;
+        buttonEl.textContent = 'Granting...';
+      }
+      try {
+        const res = await fetch('/api/admin/flight-plans/' + encodeURIComponent(publicId) + '/approve', {
+          method: 'POST',
+        });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to grant permission.');
+        }
+        await loadDashboard();
+      } catch (err) {
+        if (buttonEl) {
+          buttonEl.disabled = false;
+          buttonEl.textContent = originalText || 'Grant permission';
+        }
+        alert(err && err.message ? err.message : 'Failed to grant permission.');
+      }
     }
 
     function ensureAdminDroneMap() {
